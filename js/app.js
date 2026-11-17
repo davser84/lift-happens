@@ -1,0 +1,1150 @@
+import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.js';
+import * as db from './db.js';
+import {
+  DEFAULT_SETTINGS, uid, round2, fmtNum, fmtWeight, parseNum, increase, decrease,
+  createSession, startingSets, setsFromHistory, hasEmptyWeight, activePlans, nextPlanAfter,
+  plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
+  validateImport, buildExport
+} from './logic.js';
+
+const VERSION = '1.0.0';
+
+// ======================================================================
+// Store: one in-memory copy of the data, written through to IndexedDB.
+// ======================================================================
+
+let state = {
+  loaded: false,
+  exercises: [],
+  plans: [],
+  sessions: [],
+  settings: { ...DEFAULT_SETTINGS },
+  route: { name: 'home' },
+  toast: null
+};
+const listeners = new Set();
+
+function setState(patch) {
+  state = { ...state, ...patch };
+  listeners.forEach((l) => l());
+}
+
+function useStore() {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((x) => x + 1);
+    listeners.add(l);
+    return () => listeners.delete(l);
+  }, []);
+  return state;
+}
+
+let toastTimer = null;
+function toast(msg) {
+  clearTimeout(toastTimer);
+  setState({ toast: msg });
+  toastTimer = setTimeout(() => setState({ toast: null }), 2800);
+}
+
+function go(route) {
+  setState({ route });
+  window.scrollTo(0, 0);
+}
+
+const upsert = (list, item) => {
+  const i = list.findIndex((x) => x.id === item.id);
+  if (i < 0) return [...list, item];
+  const copy = list.slice();
+  copy[i] = item;
+  return copy;
+};
+
+function failed(err) {
+  console.error(err);
+  toast('Could not save: ' + (err && err.message ? err.message : 'storage error'));
+}
+
+function saveSession(session) {
+  setState({ sessions: upsert(state.sessions, session) });
+  return db.put('sessions', session).catch(failed);
+}
+
+function deleteSession(id) {
+  setState({ sessions: state.sessions.filter((s) => s.id !== id) });
+  return db.remove('sessions', id).catch(failed);
+}
+
+function saveSettings(patch) {
+  const settings = { ...state.settings, ...patch };
+  setState({ settings });
+  return db.saveSettings(settings).catch(failed);
+}
+
+function savePlan(plan) {
+  setState({ plans: upsert(state.plans, plan) });
+  return db.put('plans', plan).catch(failed);
+}
+
+function saveExercise(ex) {
+  setState({ exercises: upsert(state.exercises, ex) });
+  return db.put('exercises', ex).catch(failed);
+}
+
+const getSession = (id) => state.sessions.find((s) => s.id === id);
+const exMap = () => Object.fromEntries(state.exercises.map((e) => [e.id, e]));
+
+// ======================================================================
+// Small helpers and shared pieces
+// ======================================================================
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function fmtDate(iso, withDay) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return (withDay ? DAYS[d.getDay()] + ', ' : '') + d.getDate() + ' ' + MONTHS[d.getMonth()];
+}
+const planName = (plan) => (plan ? 'Workout ' + plan.name : 'Workout');
+
+const P = {
+  back: 'M15 6l-6 6 6 6',
+  check: 'M5 12.5l4.5 4.5L19 7.5',
+  minus: 'M5 12h14',
+  plus: 'M12 5v14M5 12h14',
+  x: 'M6 6l12 12M18 6L6 18',
+  swap: 'M7 7h12l-3-3M17 17H5l3 3',
+  skip: 'M5 5v14M9 5l10 7-10 7z',
+  wrench: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.1-.4-.4-2.1z',
+  home: 'M4 11l8-7 8 7v9h-5v-6H9v6H4z',
+  list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
+  chart: 'M4 19V5M4 19h16M8 15l4-4 3 3 5-6',
+  gear: 'M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z',
+  trophy: 'M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0V4zM7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4',
+  up: 'M12 19V5M6 11l6-6 6 6',
+  down: 'M12 5v14M6 13l6 6 6-6',
+  chevron: 'M6 9l6 6 6-6'
+};
+
+function Icon({ name, size = 20, sw = 2 }) {
+  return html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width=${sw} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    ${name === 'gear' ? html`<circle cx="12" cy="12" r="3" />` : null}
+    <path d=${P[name]} />
+  </svg>`;
+}
+
+function Nav({ active }) {
+  const tabs = [['home', 'Today', 'home'], ['plans', 'Plans', 'list'], ['progress', 'Progress', 'chart'], ['settings', 'Settings', 'gear']];
+  return html`<nav class="nav" aria-label="Main">
+    ${tabs.map(([id, label, icon]) => html`<button key=${id} class=${active === id ? 'active' : ''} aria-current=${active === id ? 'page' : undefined} onClick=${() => go({ name: id })}>
+      <${Icon} name=${icon} size=${22} />${label}
+    </button>`)}
+  </nav>`;
+}
+
+function Sheet({ title, sub, children, onClose, footer }) {
+  return html`<div class="overlay" onClick=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div class="sheet" role="dialog" aria-label=${title}>
+      <div class="sheet-head"><h2>${title}</h2>${sub ? html`<p class="small muted">${sub}</p>` : null}</div>
+      ${footer || null}
+      <div class="sheet-list">${children}</div>
+      <div class="sheet-foot"><button class="btn btn-big" onClick=${onClose}>Cancel</button></div>
+    </div>
+  </div>`;
+}
+
+// Exercise picker with "create new" field; used by Workout (swap/add) and Plans (add/replace).
+function ExercisePicker({ title, sub, exclude, onPick, onClose, showLast }) {
+  const [name, setName] = useState('');
+  const list = state.exercises.filter((e) => !e.archived && !exclude.has(e.id)).sort((a, b) => a.name.localeCompare(b.name));
+  const create = () => {
+    const n = name.trim();
+    if (!n) return;
+    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false };
+    saveExercise(ex);
+    onPick(ex.id);
+  };
+  const footer = html`<div style="padding: 0 16px 10px; display: flex; gap: 8px; align-items: flex-end">
+    <label class="field" style="flex: 1">New exercise
+      <input class="input" value=${name} placeholder="Name" onInput=${(e) => setName(e.target.value)} />
+    </label>
+    <button class="btn btn-primary" onClick=${create}>Create</button>
+  </div>`;
+  return html`<${Sheet} title=${title} sub=${sub} onClose=${onClose} footer=${footer}>
+    ${list.length ? list.map((e) => {
+      const last = showLast ? lastWeightText(e.id) : '';
+      return html`<button key=${e.id} class="sheet-item" onClick=${() => onPick(e.id)}>
+        <span>${e.name}</span><span class="small muted num">${last}</span>
+      </button>`;
+    }) : html`<p class="small muted" style="padding: 10px">No other exercises in the catalog yet. Create one above.</p>`}
+  <//>`;
+}
+
+function lastWeightText(exId) {
+  const h = exerciseHistory(state.sessions, exId);
+  if (!h.length) return '';
+  const last = h[h.length - 1];
+  return last.top === 0 ? 'bodyweight' : 'last ' + fmtNum(last.top) + ' kg';
+}
+
+function useWakeLock(enabled) {
+  useEffect(() => {
+    if (!enabled || !('wakeLock' in navigator)) return undefined;
+    let lock = null;
+    let alive = true;
+    const request = async () => {
+      try {
+        if (document.visibilityState === 'visible' && alive) lock = await navigator.wakeLock.request('screen');
+      } catch (e) { /* not allowed or not supported */ }
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible') request(); };
+    request();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      document.removeEventListener('visibilitychange', onVisible);
+      if (lock) lock.release().catch(() => {});
+    };
+  }, [enabled]);
+}
+
+// ======================================================================
+// Import / export
+// ======================================================================
+
+async function importFile(file) {
+  try {
+    const text = await file.text();
+    const data = validateImport(JSON.parse(text));
+    const hasData = state.plans.length || state.sessions.length;
+    if (hasData && !window.confirm('Replace all plans and history on this iPhone with this file?')) return;
+    await db.replaceAll(data);
+    setState({ exercises: data.exercises, plans: data.plans, sessions: data.sessions, settings: data.settings, route: { name: 'home' } });
+    toast('Imported ' + data.exercises.length + ' exercises, ' + data.plans.length + ' plans, ' + data.sessions.length + ' workouts.');
+  } catch (err) {
+    console.error(err);
+    toast(err instanceof SyntaxError ? 'This file is not valid JSON.' : err.message);
+  }
+}
+
+function ImportButton({ label, cls }) {
+  const ref = useRef(null);
+  return html`<span>
+    <button class=${cls || 'btn'} onClick=${() => ref.current && ref.current.click()}>${label}</button>
+    <input ref=${ref} type="file" accept="application/json,.json" style="display: none"
+      onChange=${(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) importFile(f); }} />
+  </span>`;
+}
+
+async function exportBackup() {
+  const now = new Date();
+  const name = 'lift-happens-backup-' + now.toISOString().slice(0, 10) + '.json';
+  const text = JSON.stringify(buildExport(state, now), null, 2);
+  const file = new File([text], name, { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+    } else {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+    saveSettings({ lastBackup: now.toISOString() });
+    toast('Backup ready: ' + name);
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    console.error(err);
+    toast('Export failed: ' + (err.message || err));
+  }
+}
+
+// ======================================================================
+// Welcome (first run)
+// ======================================================================
+
+function Welcome() {
+  const startEmpty = async () => {
+    const a = { id: uid(), name: 'A', order: 0, archived: false, items: [] };
+    const b = { id: uid(), name: 'B', order: 1, archived: false, items: [] };
+    await savePlan(a);
+    await savePlan(b);
+    await saveSettings({ nextPlanId: a.id });
+    go({ name: 'plans' });
+  };
+  return html`<div class="screen">
+    <div class="main" style="justify-content: center; padding: calc(var(--safe-top) + 32px) 24px 32px; gap: 18px">
+      <img src="icons/icon-180.png" width="88" height="88" alt="" style="border-radius: 20px" />
+      <h1 class="title">Lift Happens</h1>
+      <p class="muted" style="line-height: 1.5">Your plans, pre-filled with last time's weights. Everything stays on this iPhone.</p>
+      <${ImportButton} label="Import plans or backup file" cls="btn btn-primary btn-big" />
+      <button class="btn btn-big" onClick=${startEmpty}>Start with empty plans A and B</button>
+      <p class="tiny muted">Tip: add this page to your Home Screen first (Share → Add to Home Screen), then open it from there.</p>
+    </div>
+  </div>`;
+}
+
+// ======================================================================
+// Home
+// ======================================================================
+
+function Home() {
+  const d = useStore();
+  const [override, setOverride] = useState(null);
+  const plans = activePlans(d.plans);
+  const open = d.sessions.find((s) => !s.finishedAt);
+  const planned = plannedPlanId(d.plans, d.settings);
+  const todayId = override || planned;
+  const plan = plans.find((p) => p.id === todayId);
+  const exById = exMap();
+  const finished = d.sessions.filter((s) => s.finishedAt).sort((a, b) => Date.parse(b.finishedAt) - Date.parse(a.finishedAt));
+  const last = finished[0];
+  const lastPlan = last ? d.plans.find((p) => p.id === last.planId) : null;
+  const afterToday = plan ? plans.find((p) => p.id === nextPlanAfter(d.plans, plan.id)) : null;
+
+  const start = () => {
+    if (!plan) return;
+    if (!plan.items.length) { toast('This plan has no exercises yet. Add some in Plans.'); return; }
+    const s = createSession(plan, d.sessions);
+    saveSession(s);
+    go({ name: 'workout', id: s.id });
+  };
+  const discard = () => {
+    if (window.confirm('Discard the workout in progress? Its log will be deleted.')) deleteSession(open.id);
+  };
+
+  const names = plan ? plan.items.map((it) => (exById[it.exerciseId] || {}).name).filter(Boolean) : [];
+  const preview = names.slice(0, 4).join(' · ') + (names.length > 4 ? ' + ' + (names.length - 4) + ' more' : '');
+
+  return html`<div class="screen">
+    <div class="header">
+      <span class="small muted">${fmtDate(new Date().toISOString(), true)}</span>
+      <h1 class="title">Lift Happens</h1>
+    </div>
+    <div class="main" style="gap: 16px; padding-top: 16px">
+      ${open ? html`<section class="card card-pad" style="gap: 12px; border-color: var(--accent)">
+        <span class="section-label" style="margin: 0">In progress</span>
+        <h2 style="font-size: 28px; font-weight: 700">${planName(d.plans.find((p) => p.id === open.planId))}</h2>
+        <p class="small muted">Started ${fmtDate(open.startedAt, true)} · ${open.entries.filter((e) => e.status !== 'open').length} of ${open.entries.length} exercises handled</p>
+        <button class="btn btn-primary btn-big" onClick=${() => go({ name: 'workout', id: open.id })}>Resume workout</button>
+        <button class="btn btn-ghost" onClick=${discard}>Discard this workout</button>
+      </section>` : html`<section class="card card-pad" style="padding: 20px; gap: 14px">
+        <span class="section-label" style="margin: 0">Today</span>
+        <div>
+          <h2 style="font-size: 40px; font-weight: 700; line-height: 1">${planName(plan)}</h2>
+          <p class="muted" style="margin-top: 6px">${plan ? plan.items.length + ' exercises' : 'No plan'}</p>
+        </div>
+        ${preview ? html`<p class="small" style="line-height: 1.5; color: var(--text-2)">${preview}</p>` : null}
+        <button class="btn btn-primary btn-big" style="min-height: 56px; font-size: 17px" onClick=${start}>Start workout</button>
+        ${plans.filter((p) => p.id !== todayId).map((p) => html`<button key=${p.id} class="btn btn-ghost" onClick=${() => setOverride(p.id)}>Do ${planName(p)} instead</button>`)}
+      </section>`}
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <span class="section-label">Rotation</span>
+        <div style="display: flex; gap: 8px">
+          <div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
+            <span class="small muted">Last workout</span>
+            <span style="font-size: 17px; font-weight: 600">${last ? planName(lastPlan) : '—'}</span>
+            ${last ? html`<span class="tiny muted">${fmtDate(last.finishedAt, true)}</span>` : null}
+          </div>
+          <div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
+            <span class="small muted">After this one</span>
+            <span style="font-size: 17px; font-weight: 600">${afterToday ? planName(afterToday) : '—'}</span>
+          </div>
+        </div>
+      </section>
+    </div>
+    <${Nav} active="home" />
+  </div>`;
+}
+
+// ======================================================================
+// Workout
+// ======================================================================
+
+function Workout({ id }) {
+  const d = useStore();
+  const session = d.sessions.find((s) => s.id === id);
+  const [openId, setOpenId] = useState(() => {
+    const s = getSession(id);
+    const first = s && s.entries.slice().sort((a, b) => a.order - b.order).find((e) => e.status === 'open');
+    return first ? first.id : null;
+  });
+  const [edit, setEdit] = useState(null);
+  const editRef = useRef(null);
+  const clearEdit = () => { editRef.current = null; setEdit(null); };
+  const [sheet, setSheet] = useState(null);
+  const [setupOpen, setSetupOpen] = useState({});
+  const [confirmFinish, setConfirmFinish] = useState(false);
+  const [drag, setDrag] = useState(null);
+  const dragRef = useRef(null);
+  const suppressClick = useRef(false);
+  useWakeLock(d.settings.keepAwake);
+
+  useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
+  if (!session) return null;
+
+  const exById = exMap();
+  const plan = d.plans.find((p) => p.id === session.planId);
+  const settings = d.settings;
+  const entries = session.entries.slice().sort((a, b) => a.order - b.order);
+  const opts = { excludeSessionId: id };
+
+  // Always patch the latest copy, so quick taps never overwrite each other.
+  const patchEntries = (fn) => {
+    const cur = getSession(id);
+    if (cur) saveSession({ ...cur, entries: fn(cur.entries) });
+  };
+  const patchEntry = (eid, fn) => patchEntries((list) => list.map((e) => (e.id === eid ? fn(e) : e)));
+  const patchSet = (eid, i, patch) => patchEntry(eid, (e) => ({ ...e, sets: e.sets.map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
+  const latestEntry = (eid) => (getSession(id).entries.find((e) => e.id === eid));
+
+  const nextOpenAfter = (eid, list) => {
+    const ord = list.slice().sort((a, b) => a.order - b.order);
+    const i = ord.findIndex((e) => e.id === eid);
+    const seq = ord.slice(i + 1).concat(ord.slice(0, Math.max(0, i)));
+    const n = seq.find((e) => e.status === 'open' && e.id !== eid);
+    return n ? n.id : null;
+  };
+
+  const markDone = (eid, fromSwipe) => {
+    const e = latestEntry(eid);
+    if (!e) return;
+    if (hasEmptyWeight(e)) {
+      toast('Enter a weight for every set first.');
+      setOpenId(eid);
+      return;
+    }
+    const now = new Date().toISOString();
+    let after = null;
+    patchEntries((list) => {
+      const next = list.map((x) => (x.id === eid ? { ...x, status: 'done', doneAt: now } : x));
+      after = nextOpenAfter(eid, next);
+      return next;
+    });
+    clearEdit();
+    if (!fromSwipe) setOpenId(settings.autoAdvance ? after : null);
+  };
+
+  const skip = (e) => {
+    clearEdit();
+    if (e.kind === 'added') {
+      patchEntries((list) => list.filter((x) => x.id !== e.id));
+      setOpenId(null);
+      return;
+    }
+    if (e.status === 'skipped') { patchEntry(e.id, (x) => ({ ...x, status: 'open' })); return; }
+    let after = null;
+    patchEntries((list) => {
+      const next = list.map((x) => (x.id === e.id ? { ...x, status: 'skipped', doneAt: null } : x));
+      after = nextOpenAfter(e.id, next);
+      return next;
+    });
+    setOpenId(settings.autoAdvance ? after : null);
+  };
+
+  const planItemOf = (e) => (plan ? plan.items.find((it) => it.id === e.planItemId) : null);
+
+  const pickSwap = (entryId, exId) => {
+    setSheet(null);
+    patchEntry(entryId, (e) => {
+      const item = planItemOf(e);
+      const count = item ? item.sets : e.sets.length;
+      const reps = item ? item.reps : e.sets[0].reps;
+      return {
+        ...e, kind: 'swapped', status: 'open', doneAt: null,
+        replacesExerciseId: e.kind === 'swapped' ? e.replacesExerciseId : e.exerciseId,
+        exerciseId: exId,
+        sets: setsFromHistory(exId, count, reps, state.sessions, opts)
+      };
+    });
+    setOpenId(entryId);
+  };
+
+  const undoSwap = (e) => {
+    const item = planItemOf(e);
+    patchEntry(e.id, (x) => ({
+      ...x, kind: 'planned', exerciseId: x.replacesExerciseId, replacesExerciseId: null, status: 'open', doneAt: null,
+      sets: item ? startingSets(item, state.sessions, opts) : setsFromHistory(x.replacesExerciseId, x.sets.length, x.sets[0].reps, state.sessions, opts)
+    }));
+  };
+
+  const pickAdd = (exId) => {
+    setSheet(null);
+    const newId = uid();
+    patchEntries((list) => {
+      const order = list.reduce((m, x) => Math.max(m, x.order), -1) + 1;
+      return [...list, {
+        id: newId, order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
+        status: 'open', doneAt: null, sets: setsFromHistory(exId, 3, 8, state.sessions, opts)
+      }];
+    });
+    setOpenId(newId);
+  };
+
+  // Weight and reps are real inputs: tapping one opens the iPhone keypad directly.
+  const startEdit = (ev, entryId, i, f, draft) => {
+    const next = { entryId, i, f, draft };
+    editRef.current = next;
+    setEdit(next);
+    const t = ev.target;
+    setTimeout(() => { try { t.select(); } catch (err) { /* ignore */ } }, 0);
+  };
+  const onEditInput = (ev) => {
+    if (!editRef.current) return;
+    editRef.current = { ...editRef.current, draft: ev.target.value };
+    setEdit(editRef.current);
+  };
+  const onEditKey = (ev) => { if (ev.key === 'Enter') ev.target.blur(); };
+
+  const commitEdit = () => {
+    const ed = editRef.current;
+    editRef.current = null;
+    if (!ed) return;
+    setEdit(null);
+    const v = parseNum(ed.draft);
+    if (Number.isNaN(v) || v < 0) return;
+    patchSet(ed.entryId, ed.i, ed.f === 'w' ? { weight: round2(v) } : { reps: Math.round(v) });
+  };
+
+  const finalize = (skipOpen) => {
+    const cur = getSession(id);
+    const entriesNext = cur.entries.map((e) => (skipOpen && e.status === 'open' ? { ...e, status: 'skipped' } : e));
+    saveSession({ ...cur, entries: entriesNext, finishedAt: new Date().toISOString() });
+    const next = nextPlanAfter(state.plans, cur.planId);
+    if (next) saveSettings({ nextPlanId: next });
+    setConfirmFinish(false);
+    go({ name: 'summary', id });
+  };
+  const finish = () => {
+    clearEdit();
+    if (getSession(id).entries.some((e) => e.status === 'open')) setConfirmFinish(true);
+    else finalize(false);
+  };
+
+  const handled = entries.filter((e) => e.status !== 'open').length;
+  const pending = entries.filter((e) => e.status === 'open');
+  const handledList = entries.filter((e) => e.status !== 'open');
+  const openEntries = pending;
+  const inSession = new Set(entries.map((e) => e.exerciseId));
+
+  // ---- swipe to confirm on collapsed cards ----
+  const swipeHandlers = (e, canSwipe) => ({
+    onPointerDown: (ev) => {
+      if (!canSwipe) return;
+      dragRef.current = { id: e.id, x0: ev.clientX, y0: ev.clientY, moved: false, dx: 0 };
+    },
+    onPointerMove: (ev) => {
+      const g = dragRef.current;
+      if (!g || g.id !== e.id) return;
+      const dx = ev.clientX - g.x0, dy = ev.clientY - g.y0;
+      if (!g.moved) {
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+          g.moved = true;
+          try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (err) { /* ignore */ }
+        } else {
+          if (Math.abs(dy) > 10) dragRef.current = null;
+          return;
+        }
+      }
+      g.dx = Math.max(0, Math.min(dx, 180));
+      setDrag({ id: e.id, dx: g.dx });
+    },
+    onPointerUp: () => {
+      const g = dragRef.current;
+      dragRef.current = null;
+      if (!g || g.id !== e.id || !g.moved) return;
+      suppressClick.current = true;
+      setTimeout(() => { suppressClick.current = false; }, 400);
+      setDrag(null);
+      if (g.dx > 90) markDone(e.id, true);
+    },
+    onPointerCancel: () => { dragRef.current = null; setDrag(null); }
+  });
+
+  const card = (e) => {
+    const ex = exById[e.exerciseId] || { name: 'Exercise', equipment: 'machine' };
+    const item = planItemOf(e);
+    const open = openId === e.id;
+    const isDone = e.status === 'done';
+    const isSkipped = e.status === 'skipped';
+    const canSwipe = e.status === 'open' && !open;
+    const dx = drag && drag.id === e.id ? drag.dx : 0;
+    const ws = e.sets.map((x) => x.weight);
+    const known = ws.filter((w) => w !== null && w !== undefined);
+    const lo = known.length ? Math.min.apply(null, known) : null;
+    const hi = known.length ? Math.max.apply(null, known) : null;
+    const wTxt = known.length < ws.length ? 'weight to enter' : hi === 0 ? 'bodyweight' : lo === hi ? fmtNum(lo) + ' kg' : fmtNum(lo) + '–' + fmtNum(hi) + ' kg';
+    const reps = e.sets.map((x) => x.reps);
+    const rTxt = reps.every((r) => r === reps[0]) ? reps[0] : reps.join('/');
+    const tags = [];
+    if (e.kind === 'added') tags.push('Added · today only');
+    if (e.kind === 'swapped') tags.push('Replaces ' + ((exById[e.replacesExerciseId] || {}).name || 'planned exercise') + ' · today only');
+    if (item && e.sets.length !== item.sets) tags.push(e.sets.length + ' of ' + item.sets + ' sets · log only');
+
+    return html`<div key=${e.id} class="swipe-wrap">
+      ${dx > 0 ? html`<div class="swipe-under" style=${'opacity:' + Math.min(1, dx / 90)}><span><${Icon} name="check" sw=${3} /> Done</span></div>` : null}
+      <section class=${'card ex-card' + (open ? ' open' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
+        <button class="ex-head" aria-expanded=${open} ...${swipeHandlers(e, canSwipe)}
+          onClick=${() => { if (suppressClick.current) return; clearEdit(); setOpenId(open ? null : e.id); }}>
+          <div class="ex-head-text">
+            <span class="ex-name">${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
+            <span class="small muted num">${e.sets.length} × ${rTxt} · ${wTxt}</span>
+            ${tags.length ? html`<span class="ex-tag">${tags.join(' · ')}</span>` : null}
+          </div>
+          ${isDone ? html`<span class="check-badge"><${Icon} name="check" size=${16} sw=${3} /></span>` : null}
+          ${isSkipped ? html`<span class="skip-badge">Skipped</span>` : null}
+        </button>
+        ${open ? html`<div class="ex-body">
+          ${isSkipped ? html`<div class="skip-box">
+            <p style="flex: 1">Logged as skipped. It stays in the plan with the same weights next time.</p>
+            <button class="btn" onClick=${() => skip(e)}>Undo</button>
+          </div>` : html`
+          <div class="set-grid"><span></span><span class="col-label">KG</span><span class="col-label">REPS</span><span></span></div>
+          ${e.sets.map((s, i) => {
+            const editW = edit && edit.entryId === e.id && edit.i === i && edit.f === 'w';
+            const editR = edit && edit.entryId === e.id && edit.i === i && edit.f === 'r';
+            const empty = s.weight === null || s.weight === undefined;
+            return html`<div key=${i} class="set-grid">
+              <span class="set-num">${i + 1}</span>
+              <div class=${'stepper' + (empty ? ' empty' : '')}>
+                <button class="icon-btn" aria-label=${'Decrease weight, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { weight: decrease(ex.equipment, latestEntry(e.id).sets[i].weight, settings) })}><${Icon} name="minus" size=${18} sw=${2.2} /></button>
+                <input class="step-field" inputmode="decimal" enterkeyhint="done" autocomplete="off" aria-label=${'Weight in kg, set ' + (i + 1)} placeholder="enter"
+                  value=${editW ? edit.draft : (empty ? '' : fmtNum(s.weight))}
+                  onFocus=${(ev) => startEdit(ev, e.id, i, 'w', empty ? '' : fmtNum(s.weight))}
+                  onInput=${onEditInput} onBlur=${commitEdit} onKeyDown=${onEditKey} />
+                <button class="icon-btn" aria-label=${'Increase weight, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { weight: increase(ex.equipment, latestEntry(e.id).sets[i].weight, settings) })}><${Icon} name="plus" size=${18} sw=${2.2} /></button>
+              </div>
+              <div class="stepper">
+                <button class="icon-btn" aria-label=${'Fewer reps, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { reps: Math.max(0, latestEntry(e.id).sets[i].reps - 1) })}><${Icon} name="minus" size=${18} sw=${2.2} /></button>
+                <input class="step-field" inputmode="numeric" enterkeyhint="done" autocomplete="off" aria-label=${'Reps, set ' + (i + 1)}
+                  value=${editR ? edit.draft : String(s.reps)}
+                  onFocus=${(ev) => startEdit(ev, e.id, i, 'r', String(s.reps))}
+                  onInput=${onEditInput} onBlur=${commitEdit} onKeyDown=${onEditKey} />
+                <button class="icon-btn" aria-label=${'More reps, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { reps: latestEntry(e.id).sets[i].reps + 1 })}><${Icon} name="plus" size=${18} sw=${2.2} /></button>
+              </div>
+              ${e.sets.length > 1 ? html`<button class="icon-btn remove-set" aria-label=${'Remove set ' + (i + 1) + ' from today’s log'} onClick=${() => patchEntry(e.id, (x) => ({ ...x, sets: x.sets.filter((_, j) => j !== i) }))}><${Icon} name="x" size=${18} /></button>` : html`<span></span>`}
+            </div>`;
+          })}
+          ${setupOpen[e.id] && ex.setup ? html`<div class="note-box"><${Icon} name="wrench" size=${18} /><span>Machine setup: <strong>${ex.setup}</strong></span></div>` : null}
+          <div class="btn-row" style="margin-top: 6px">
+            <button class="btn" onClick=${() => patchEntry(e.id, (x) => ({ ...x, sets: [...x.sets, { ...x.sets[x.sets.length - 1] }] }))}><${Icon} name="plus" size=${16} sw=${2.2} /> Set</button>
+            ${e.kind === 'added' ? null : e.kind === 'swapped'
+              ? html`<button class="btn" onClick=${() => undoSwap(e)}><${Icon} name="swap" size=${16} /> Undo swap</button>`
+              : html`<button class="btn" onClick=${() => setSheet({ mode: 'swap', entryId: e.id, from: ex.name })}><${Icon} name="swap" size=${16} /> Swap</button>`}
+            <button class="btn" onClick=${() => skip(e)}><${Icon} name=${e.kind === 'added' ? 'x' : 'skip'} size=${16} /> ${e.kind === 'added' ? 'Remove' : 'Skip'}</button>
+            ${ex.setup ? html`<button class="btn" aria-pressed=${!!setupOpen[e.id]} onClick=${() => setSetupOpen({ ...setupOpen, [e.id]: !setupOpen[e.id] })}><${Icon} name="wrench" size=${16} /> Setup</button>` : null}
+          </div>
+          ${isDone
+            ? html`<button class="btn" style="margin-top: 6px" onClick=${() => patchEntry(e.id, (x) => ({ ...x, status: 'open', doneAt: null }))}>Mark as not done</button>`
+            : html`<button class="btn btn-primary btn-big" style="margin-top: 6px; border-radius: 12px" onClick=${() => markDone(e.id, false)}><${Icon} name="check" sw=${3} /> Done · next exercise</button>`}
+          `}
+        </div>` : null}
+      </section>
+    </div>`;
+  };
+
+  return html`<div class="screen">
+    <div class="header">
+      <div class="header-row">
+        <button class="icon-btn back" aria-label="Back to Today" onClick=${() => go({ name: 'home' })}><${Icon} name="back" size=${22} /></button>
+        <span class="small muted">${fmtDate(session.startedAt, true)}</span>
+      </div>
+      <h1 class="title">${planName(plan)}</h1>
+      <div style="display: flex; align-items: center; gap: 10px">
+        <div class="bar"><div style=${'width:' + Math.round((handled / Math.max(1, entries.length)) * 100) + '%'}></div></div>
+        <span class="small muted num">${handled} / ${entries.length} exercises</span>
+      </div>
+      ${handled < 2 ? html`<span class="tiny muted">Swipe right on an exercise to mark it Done without opening it.</span>` : null}
+    </div>
+    <div class="main">
+      ${pending.map(card)}
+      ${handledList.length ? html`<h2 class="section-label">Done & skipped · ${handledList.length}</h2>` : null}
+      ${handledList.map(card)}
+      <button class="btn-dashed" style="margin-top: 4px" onClick=${() => setSheet({ mode: 'add' })}><${Icon} name="plus" size=${18} sw=${2.2} /> Add exercise (today only)</button>
+    </div>
+    <div class="footer"><button class="btn btn-big btn-outline" onClick=${finish}>Finish workout</button></div>
+
+    ${sheet && sheet.mode === 'swap' ? html`<${ExercisePicker} title=${'Swap ' + sheet.from + ' for…'} showLast=${true}
+      sub=${'Logged today only. Next time the plan shows ' + sheet.from + ' again, with its usual weights.'}
+      exclude=${inSession} onClose=${() => setSheet(null)} onPick=${(exId) => pickSwap(sheet.entryId, exId)} />` : null}
+    ${sheet && sheet.mode === 'add' ? html`<${ExercisePicker} title="Add an exercise" showLast=${true}
+      sub="Logged today only. It is not added to the plan." exclude=${inSession}
+      onClose=${() => setSheet(null)} onPick=${pickAdd} />` : null}
+
+    ${confirmFinish ? html`<div class="overlay center">
+      <div class="dialog" role="alertdialog" aria-labelledby="finish-title">
+        <h2 id="finish-title">Workout not complete</h2>
+        <p style="line-height: 1.45">${openEntries.length} ${openEntries.length === 1 ? 'exercise' : 'exercises'} not done: ${openEntries.map((e) => (exById[e.exerciseId] || {}).name).join(', ')}</p>
+        <p class="small muted" style="line-height: 1.45">If you finish now, they are logged as skipped and come back next time with the same weights.</p>
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
+          <button class="btn btn-primary btn-big" autofocus onClick=${() => { setConfirmFinish(false); if (openEntries[0]) setOpenId(openEntries[0].id); }}>Back to workout</button>
+          <button class="btn btn-big btn-warn" onClick=${() => finalize(true)}>Finish anyway</button>
+        </div>
+      </div>
+    </div>` : null}
+  </div>`;
+}
+
+// ======================================================================
+// Finish summary
+// ======================================================================
+
+function Summary({ id }) {
+  const d = useStore();
+  const session = d.sessions.find((s) => s.id === id);
+  useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
+  if (!session) return null;
+  const plan = d.plans.find((p) => p.id === session.planId);
+  const next = d.plans.find((p) => p.id === d.settings.nextPlanId);
+  const sum = sessionSummary(session, d.sessions, exMap(), plan);
+  const maxAbs = Math.max(0, ...sum.rows.filter((r) => r.delta !== null && !r.bodyweight).map((r) => Math.abs(r.delta)));
+  const volPct = sum.volPct === null ? '—' : (sum.volPct > 0 ? '+' : sum.volPct < 0 ? '−' : '±') + Math.abs(sum.volPct).toFixed(1) + '%';
+  const reopen = () => {
+    saveSession({ ...session, finishedAt: null });
+    go({ name: 'workout', id });
+  };
+
+  return html`<div class="screen">
+    <div class="main" style="padding: calc(var(--safe-top) + 24px) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
+      <div style="display: flex; align-items: center; gap: 12px">
+        <span class="check-badge" style="width: 44px; height: 44px; border-radius: 22px"><${Icon} name="check" size=${24} sw=${3} /></span>
+        <div style="display: flex; flex-direction: column; gap: 2px">
+          <h1 style="font-size: 24px; font-weight: 700">${planName(plan)} saved</h1>
+          <span class="small muted">${sum.setsLogged} sets logged · ${sum.skipped} skipped · next up: ${planName(next)}</span>
+          <span class="small muted">Saved automatically. You can close the app.</span>
+        </div>
+      </div>
+
+      <section class="card card-pad">
+        <span class="section-label" style="margin: 0">Total volume vs last time</span>
+        <span class="hero-num num">${volPct}</span>
+        <span class="small muted num">${sum.volLast > 0
+          ? 'Last ' + Math.round(sum.volLast).toLocaleString('en') + ' kg · today ' + Math.round(sum.volToday).toLocaleString('en') + ' kg (weight × reps, same exercises)'
+          : 'Nothing to compare yet: these exercises have no earlier session.'}${sum.rows.some((r) => r.vsPlan) ? '. First time: compared with the plan’s starting weights.' : ''}</span>
+      </section>
+
+      <section class="card card-pad" style="gap: 12px">
+        <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap">
+          <h2 style="font-size: 15px; font-weight: 600">Top-set weight vs last time</h2>
+          <div class="legend"><span><i style="background: var(--up)"></i>Heavier</span><span><i style="background: var(--down)"></i>Lighter</span></div>
+        </div>
+        <span class="small muted">${sum.heavier} heavier · ${sum.lighter} lighter · ${sum.same} same${sum.records ? ' · ' + sum.records + (sum.records === 1 ? ' new record' : ' new records') : ''}</span>
+        <div>
+          ${sum.rows.length ? sum.rows.map((r) => {
+            let detail, delta, bw = 0, dir = null;
+            if (r.delta === null) { detail = r.bodyweight ? r.totalReps + ' reps' : fmtNum(r.top) + ' kg · first time'; delta = 'new'; }
+            else if (r.bodyweight) { detail = 'reps ' + r.prevReps + ' → ' + r.totalReps; delta = r.delta > 0 ? '+' + r.delta + ' reps' : r.delta < 0 ? '−' + (-r.delta) + ' reps' : 'same'; }
+            else {
+              detail = (r.delta !== 0 ? fmtNum(r.prevTop) + ' → ' + fmtNum(r.top) + ' kg' : fmtNum(r.top) + ' kg') + (r.vsPlan ? ' · vs plan' : '');
+              delta = r.delta > 0 ? '+' + fmtNum(r.delta) + ' kg' : r.delta < 0 ? '−' + fmtNum(-r.delta) + ' kg' : 'same';
+              if (r.delta !== 0 && maxAbs > 0) { bw = Math.max(4, Math.round((Math.abs(r.delta) / maxAbs) * 50)); dir = r.delta > 0 ? 'up' : 'down'; }
+            }
+            const rec = r.record ? (r.record.kind === 'weight'
+              ? 'New record! ' + fmtNum(r.record.value) + ' kg × ' + r.record.reps + ', set ' + (r.record.setIndex + 1) + ' of ' + r.record.setCount + ' (best was ' + fmtNum(r.record.previous) + ' kg)'
+              : 'New record! ' + r.record.value + ' reps (best was ' + r.record.previous + ')') : null;
+            return html`<div key=${r.entryId} class="sum-row">
+              <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+                <span style="font-size: 14px; font-weight: 500">${r.name}</span>
+                <span class="tiny muted num">${detail}</span>
+                ${rec ? html`<span class="record"><${Icon} name="trophy" size=${12} sw=${2.4} />${rec}</span>` : null}
+              </div>
+              <div class="dbar" aria-hidden="true"><div class="zero"></div>${dir ? html`<div class=${dir} style=${'width:' + bw + '%'}></div>` : null}</div>
+              <span class="small num" style="text-align: right; font-weight: 600">${delta}</span>
+            </div>`;
+          }) : html`<p class="small muted">No exercises were confirmed.</p>`}
+        </div>
+      </section>
+
+      <p class="small muted" style="line-height: 1.5">Today’s weights are the starting point next time you do these exercises, in any workout. Sets and reps still come from the plan.</p>
+      <button class="btn btn-primary btn-big" onClick=${() => go({ name: 'home' })}><${Icon} name="home" /> Back to Home</button>
+      <button class="btn btn-ghost" onClick=${reopen}>Edit this workout</button>
+    </div>
+  </div>`;
+}
+
+// ======================================================================
+// Plans
+// ======================================================================
+
+function Plans() {
+  const d = useStore();
+  const plans = activePlans(d.plans);
+  const [tabId, setTabId] = useState(() => plannedPlanId(d.plans, d.settings));
+  const [draft, setDraft] = useState(null);
+  const [openItem, setOpenItem] = useState(null);
+  const [sheet, setSheet] = useState(null);
+  const exById = exMap();
+  const saved = plans.find((p) => p.id === tabId) || plans[0];
+  if (!saved) return html`<div class="screen"><div class="main"><p class="muted">No plans.</p></div><${Nav} active="plans" /></div>`;
+  const plan = draft ? draft.plan : saved;
+  const exOf = (eid) => (draft && draft.exercises[eid]) || exById[eid] || { id: eid, name: 'Unknown', equipment: 'machine', setup: '' };
+
+  const base = () => draft || { plan: JSON.parse(JSON.stringify(saved)), exercises: {} };
+  const editPlan = (fn) => { const b = base(); setDraft({ ...b, plan: fn(b.plan) }); };
+  const editItem = (itemId, patch) => editPlan((p) => ({ ...p, items: p.items.map((it) => (it.id === itemId ? { ...it, ...patch } : it)) }));
+  const editEx = (eid, patch) => { const b = base(); setDraft({ ...b, exercises: { ...b.exercises, [eid]: { ...exOf(eid), ...patch } } }); };
+
+  const switchTab = (pid) => {
+    if (pid === tabId) return;
+    if (draft && !window.confirm('Discard unsaved changes to ' + planName(saved) + '?')) return;
+    setDraft(null); setOpenItem(null); setTabId(pid);
+  };
+
+  const save = async () => {
+    if (!draft) return;
+    const now = new Date().toISOString();
+    const items = draft.plan.items.map((it) => {
+      const old = saved.items.find((o) => o.id === it.id);
+      const sets = Math.max(1, parseInt(it.sets, 10) || (old ? old.sets : 3));
+      const reps = Math.max(1, parseInt(it.reps, 10) || (old ? old.reps : 8));
+      const wNum = parseNum(it.weight);
+      const weight = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? null : round2(wNum);
+      const changed = !old || old.weight !== weight || old.exerciseId !== it.exerciseId;
+      return { id: it.id, exerciseId: it.exerciseId, sets, reps, weight, weightEditedAt: changed && weight !== null ? now : (old ? old.weightEditedAt : null) };
+    });
+    for (const ex of Object.values(draft.exercises)) {
+      await saveExercise({ ...ex, name: (ex.name || '').trim() || exById[ex.id].name });
+    }
+    await savePlan({ ...draft.plan, items });
+    setDraft(null);
+    toast(planName(saved) + ' saved. It applies from the next workout.');
+  };
+
+  const move = (i, dir) => editPlan((p) => {
+    const items = p.items.slice();
+    const j = i + dir;
+    if (j < 0 || j >= items.length) return p;
+    const t = items[i]; items[i] = items[j]; items[j] = t;
+    return { ...p, items };
+  });
+
+  const inPlan = new Set(plan.items.map((it) => it.exerciseId));
+  const pick = (exId) => {
+    const sh = sheet;
+    setSheet(null);
+    if (sh.mode === 'replace') editItem(sh.itemId, { exerciseId: exId, weight: '' });
+    else {
+      const newId = uid();
+      editPlan((p) => ({ ...p, items: [...p.items, { id: newId, exerciseId: exId, sets: '3', reps: '8', weight: '' }] }));
+      setOpenItem(newId);
+    }
+  };
+
+  return html`<div class="screen">
+    <div class="header">
+      <div class="header-row">
+        <h1 class="title">Plans</h1>
+        ${draft ? html`<div style="display: flex; gap: 6px">
+          <button class="btn btn-ghost" onClick=${() => { setDraft(null); setOpenItem(null); }}>Discard</button>
+          <button class="btn btn-primary" onClick=${save}>Save</button>
+        </div>` : html`<span class="small muted">All changes saved</span>`}
+      </div>
+      <div class="seg" role="tablist" aria-label="Plan">
+        ${plans.map((p) => html`<button key=${p.id} role="tab" aria-selected=${p.id === saved.id} class=${p.id === saved.id ? 'on' : ''} onClick=${() => switchTab(p.id)}>${planName(p)}</button>`)}
+      </div>
+      <p class="small muted" style="line-height: 1.45">The plan sets exercises, order, sets and reps. Weight is optional: leave it empty to enter it at the gym.</p>
+    </div>
+    <div class="main">
+      ${plan.items.map((it, i) => {
+        const ex = exOf(it.exerciseId);
+        const open = openItem === it.id;
+        const wNum = parseNum(it.weight);
+        const wTxt = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? '—' : fmtWeight(wNum);
+        return html`<div key=${it.id} class=${'card' + (open ? ' ex-card open' : '')}>
+          <button class="ex-head" style="min-height: 56px" aria-expanded=${open} onClick=${() => setOpenItem(open ? null : it.id)}>
+            <span class="small muted num" style="width: 18px">${i + 1}</span>
+            <span style="flex: 1; min-width: 0; font-size: 15px; font-weight: 500">${ex.name}</span>
+            <span class="small muted num">${(it.sets || '?') + ' × ' + (it.reps || '?')}</span>
+            <span class="small num" style="width: 70px; text-align: right; color: var(--text-2)">${wTxt}</span>
+          </button>
+          ${open ? html`<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line)">
+            <label class="field">Exercise name (renames it everywhere)
+              <input class="input" value=${ex.name} onInput=${(e) => editEx(ex.id, { name: e.target.value })} />
+            </label>
+            <div class="grid-3">
+              <label class="field">Sets<input class="input" inputmode="numeric" value=${it.sets} onInput=${(e) => editItem(it.id, { sets: e.target.value.replace(/[^0-9]/g, '') })} /></label>
+              <label class="field">Reps<input class="input" inputmode="numeric" value=${it.reps} onInput=${(e) => editItem(it.id, { reps: e.target.value.replace(/[^0-9]/g, '') })} /></label>
+              <label class="field">Weight kg<input class="input" inputmode="decimal" placeholder="optional" value=${it.weight === null || it.weight === undefined ? '' : it.weight} onInput=${(e) => editItem(it.id, { weight: e.target.value.replace(/[^0-9.,]/g, '') })} /></label>
+            </div>
+            <div class="field">Equipment
+              <div class="seg" role="radiogroup" aria-label="Equipment">
+                <button role="radio" aria-checked=${ex.equipment !== 'dumbbell'} class=${ex.equipment !== 'dumbbell' ? 'on' : ''} onClick=${() => editEx(ex.id, { equipment: 'machine' })}>Machine / barbell</button>
+                <button role="radio" aria-checked=${ex.equipment === 'dumbbell'} class=${ex.equipment === 'dumbbell' ? 'on' : ''} onClick=${() => editEx(ex.id, { equipment: 'dumbbell' })}>Dumbbells</button>
+              </div>
+              <span class="tiny muted" style="font-weight: 400">${ex.equipment === 'dumbbell'
+                ? '+/− steps: ' + fmtNum(d.settings.stepDbSmall) + ' kg up to ' + fmtNum(d.settings.dbThreshold) + ' kg, then ' + fmtNum(d.settings.stepDbLarge) + ' kg'
+                : '+/− steps: ' + fmtNum(d.settings.stepMachine) + ' kg'}</span>
+            </div>
+            <label class="field">Machine setup (shown with an extra tap)
+              <input class="input" placeholder="e.g. seat 4, pad XL" value=${ex.setup || ''} onInput=${(e) => editEx(ex.id, { setup: e.target.value })} />
+            </label>
+            <div class="btn-row">
+              <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' up'} onClick=${() => move(i, -1)}><${Icon} name="up" size=${18} sw=${2.2} /></button>
+              <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' down'} onClick=${() => move(i, 1)}><${Icon} name="down" size=${18} sw=${2.2} /></button>
+              <button class="btn" onClick=${() => setSheet({ mode: 'replace', itemId: it.id, from: ex.name })}>Replace</button>
+              <button class="btn btn-warn" onClick=${() => { editPlan((p) => ({ ...p, items: p.items.filter((x) => x.id !== it.id) })); setOpenItem(null); }}>Remove</button>
+            </div>
+          </div>` : null}
+        </div>`;
+      })}
+      <button class="btn-dashed" style="margin-top: 6px" onClick=${() => setSheet({ mode: 'add' })}><${Icon} name="plus" size=${18} sw=${2.2} /> Add exercise to ${planName(plan)}</button>
+      ${draft ? html`<p class="tiny muted" style="text-align: center; margin-top: 6px">Unsaved changes. Tap Save at the top.</p>` : null}
+    </div>
+    ${sheet ? html`<${ExercisePicker} title=${sheet.mode === 'replace' ? 'Replace ' + sheet.from + ' with…' : 'Add to ' + planName(plan)}
+      sub="Weights follow the exercise everywhere it is used." exclude=${inPlan}
+      onClose=${() => setSheet(null)} onPick=${pick} />` : null}
+    <${Nav} active="plans" />
+  </div>`;
+}
+
+// ======================================================================
+// Progress
+// ======================================================================
+
+function Progress() {
+  const d = useStore();
+  const withHistory = d.exercises.filter((e) => exerciseHistory(d.sessions, e.id).length);
+  const [exId, setExId] = useState(() => (withHistory[0] || d.exercises[0] || {}).id);
+  const [sel, setSel] = useState(null);
+  const [all, setAll] = useState(false);
+  const [picker, setPicker] = useState(false);
+  const ex = d.exercises.find((e) => e.id === exId);
+  const hist = ex ? exerciseHistory(d.sessions, ex.id) : [];
+  const planOf = (s) => d.plans.find((p) => p.id === s.planId);
+  const inPlans = (id) => activePlans(d.plans).filter((p) => p.items.some((it) => it.exerciseId === id)).map((p) => p.name).join(' + ');
+
+  let body;
+  if (!ex) body = html`<p class="muted">No exercises yet.</p>`;
+  else if (!hist.length) body = html`<section class="card card-pad"><p class="muted">No sessions logged for ${ex.name} yet. Confirm it in a workout and it shows up here.</p></section>`;
+  else {
+    const bw = hist.every((h) => h.top === 0);
+    const unit = bw ? ' reps' : ' kg';
+    const val = (h) => (bw ? h.totalReps : h.top);
+    const windowed = hist.slice(-10);
+    const first = windowed[0], last = hist[hist.length - 1];
+    const diff = round2(val(last) - val(first));
+    const pr = personalRecord(hist);
+
+    const pts = hist.slice(-20);
+    const N = pts.length;
+    const vals = pts.map(val);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const pad = bw ? 2 : 2.5;
+    lo = Math.max(0, lo - pad); hi += pad;
+    const W = 340, L = 36, R = 336, T = 12, B = 164;
+    const X = (i) => (N === 1 ? (L + R) / 2 : L + 8 + (i / (N - 1)) * (R - L - 16));
+    const Y = (v) => B - ((v - lo) / (hi - lo)) * (B - T);
+    const s = sel === null || sel >= N ? N - 1 : sel;
+    const ticks = [lo, (lo + hi) / 2, hi];
+    const colW = N === 1 ? 120 : (R - L - 16) / (N - 1);
+    const sx = X(s), sy = Y(vals[s]);
+    const tipLeft = Math.min(Math.max(sx - 62, 0), W - 124);
+    const tipTop = sy < 80 ? sy + 14 : Math.max(0, sy - 80);
+    const recent = hist.slice().reverse().slice(0, all ? hist.length : 5);
+    const pct = (x) => (x / W) * 100 + '%';
+
+    body = html`
+      <section class="card card-pad">
+        <span class="section-label" style="margin: 0">${bw ? 'Total reps, last session' : 'Top-set weight, last session'}</span>
+        <div style="display: flex; align-items: baseline; gap: 10px">
+          <span class="hero-num num">${fmtNum(val(last)) + unit}</span>
+          <span class="num" style="font-weight: 600; color: var(--text-2)">${(diff > 0 ? '+' : diff < 0 ? '−' : '±') + fmtNum(Math.abs(diff)) + unit}</span>
+        </div>
+        <span class="small muted">Change over the last ${windowed.length} ${windowed.length === 1 ? 'session' : 'sessions'}, since ${fmtDate(first.session.startedAt)}</span>
+      </section>
+
+      <section class="card card-pad" style="flex-direction: row; align-items: center; gap: 14px">
+        <span style="width: 44px; height: 44px; flex-shrink: 0; border-radius: 22px; background: rgba(91,155,255,0.14); color: var(--accent); display: flex; align-items: center; justify-content: center"><${Icon} name="trophy" size=${22} /></span>
+        <div style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+          <span class="section-label" style="margin: 0">Personal record</span>
+          <span class="num" style="font-size: 22px; font-weight: 700">${pr.kind === 'weight' ? fmtNum(pr.value) + ' kg × ' + pr.reps : pr.value + ' reps'}</span>
+          <span class="small num" style="color: var(--text-2)">${pr.kind === 'weight'
+            ? 'Set ' + (pr.setIndex + 1) + ' of ' + pr.setCount + ', in a ' + schemeText(pr.item.entry.sets) + ' (' + setsText(pr.item.entry.sets) + ')'
+            : 'Most total reps in a session: ' + pr.item.entry.sets.map((x) => x.reps).join(' · ')}</span>
+          <span class="small muted">First reached ${fmtDate(pr.item.session.startedAt)} · ${planName(planOf(pr.item.session))}</span>
+        </div>
+      </section>
+
+      <section class="card card-pad" style="padding: 16px 12px 12px; gap: 10px">
+        <h2 style="margin: 0 4px; font-size: 15px; font-weight: 600">${bw ? 'Total reps per session' : 'Top-set weight per session (kg)'}</h2>
+        <div class="chart">
+          <svg viewBox=${'0 0 ' + W + ' 200'} aria-hidden="true">
+            ${ticks.map((t, i) => html`<g key=${i}><line x1=${L} x2=${R} y1=${Y(t)} y2=${Y(t)} stroke="#262A31" stroke-width="1" />
+              <text x=${L - 6} y=${Y(t) + 4} text-anchor="end" font-size="11" fill="#A0A6B0">${bw ? Math.round(t) : fmtNum(Math.round(t * 4) / 4)}</text></g>`)}
+            <line x1=${sx} x2=${sx} y1=${T} y2=${B} stroke="#4A505A" stroke-width="1" />
+            ${N > 1 ? html`<polyline points=${pts.map((h, i) => X(i).toFixed(1) + ',' + Y(vals[i]).toFixed(1)).join(' ')} fill="none" stroke="#4C8DF5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />` : null}
+            ${pts.map((h, i) => html`<circle key=${i} cx=${X(i)} cy=${Y(vals[i])} r=${i === s ? 6 : 4} fill="#4C8DF5" stroke="#191C22" stroke-width="2" />`)}
+            <text x=${L} y="190" font-size="11" fill="#A0A6B0">${fmtDate(pts[0].session.startedAt)}</text>
+            <text x=${R} y="190" font-size="11" fill="#A0A6B0" text-anchor="end">${fmtDate(pts[N - 1].session.startedAt)}</text>
+          </svg>
+          ${pts.map((h, i) => html`<button key=${'b' + i} aria-label=${fmtDate(h.session.startedAt) + ', ' + fmtNum(vals[i]) + unit} onClick=${() => setSel(i)}
+            style=${'position:absolute;top:0;height:88%;border:0;padding:0;background:transparent;left:' + pct(X(i) - colW / 2) + ';width:' + pct(colW)}></button>`)}
+          <div class="tip" role="status" style=${'left:' + pct(tipLeft) + ';top:' + (tipTop / 200) * 100 + '%'}>
+            <span class="tiny muted">${fmtDate(pts[s].session.startedAt) + ' · ' + planName(planOf(pts[s].session))}</span>
+            <span class="num" style="font-weight: 600">${fmtNum(vals[s]) + unit}</span>
+            <span class="tiny muted num">${setsText(pts[s].entry.sets)}</span>
+          </div>
+        </div>
+        <p class="tiny muted" style="margin: 0 4px">Tap the chart to see a session.</p>
+      </section>
+
+      <span class="section-label">Recent sessions</span>
+      ${recent.map((h) => html`<div key=${h.entry.id} class="card card-pad" style="padding: 12px 14px; gap: 4px">
+        <div style="display: flex; justify-content: space-between; gap: 8px">
+          <span style="font-size: 14px; font-weight: 600">${fmtDate(h.session.startedAt, true)}</span>
+          <span class="small muted">${planName(planOf(h.session))}${h.entry.kind === 'swapped' ? ' · as swap' : h.entry.kind === 'added' ? ' · added' : ''}</span>
+        </div>
+        <span class="small num" style="color: var(--text-2)">${setsText(h.entry.sets)}</span>
+      </div>`)}
+      ${hist.length > 5 ? html`<button class="btn" onClick=${() => setAll(!all)}>${all ? 'Show less' : 'Show all (' + hist.length + ' sessions)'}</button>` : null}`;
+  }
+
+  return html`<div class="screen">
+    <div class="header">
+      <h1 class="title">Progress</h1>
+      <button class="card" style="min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 14px; text-align: left" onClick=${() => setPicker(true)} aria-haspopup="dialog">
+        <span style="display: flex; flex-direction: column; gap: 2px"><span class="col-label" style="text-align: left">EXERCISE</span><span style="font-weight: 600">${ex ? ex.name : '—'}</span></span>
+        <span class="muted"><${Icon} name="chevron" /></span>
+      </button>
+    </div>
+    <div class="main" style="gap: 12px">${body}</div>
+    ${picker ? html`<${Sheet} title="Choose an exercise" onClose=${() => setPicker(false)}>
+      ${d.exercises.filter((e) => !e.archived).sort((a, b) => a.name.localeCompare(b.name)).map((e) => {
+        const n = exerciseHistory(d.sessions, e.id).length;
+        return html`<button key=${e.id} class="sheet-item" onClick=${() => { setExId(e.id); setSel(null); setAll(false); setPicker(false); }}>
+          <span>${e.name}</span><span class="small muted">${n ? n + (n === 1 ? ' session' : ' sessions') : inPlans(e.id) ? 'Workout ' + inPlans(e.id) : ''}</span>
+        </button>`;
+      })}
+    <//>` : null}
+    <${Nav} active="progress" />
+  </div>`;
+}
+
+// ======================================================================
+// Settings
+// ======================================================================
+
+function NumberSetting({ label, value, onSave, width = 56 }) {
+  const [text, setText] = useState(fmtNum(value));
+  useEffect(() => setText(fmtNum(value)), [value]);
+  const commit = () => {
+    const v = parseNum(text);
+    if (Number.isNaN(v) || v <= 0) { setText(fmtNum(value)); return; }
+    onSave(round2(v));
+  };
+  return html`<input class="input" style=${'width:' + width + 'px; text-align: center; padding: 0 6px'} inputmode="decimal" aria-label=${label} value=${text}
+    onInput=${(e) => setText(e.target.value)} onBlur=${commit} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} />`;
+}
+
+function Settings() {
+  const d = useStore();
+  const s = d.settings;
+  const plans = activePlans(d.plans);
+  const next = plannedPlanId(d.plans, s);
+  const toggles = [
+    ['keepAwake', 'Keep screen awake', 'The display stays on while a workout is open'],
+    ['autoAdvance', 'Auto-advance', 'Open the next exercise after Done or Skip']
+  ];
+  return html`<div class="screen">
+    <div class="header"><h1 class="title">Settings</h1></div>
+    <div class="main" style="gap: 6px">
+      <span class="section-label">Rotation</span>
+      <div class="card card-pad" style="gap: 10px">
+        <span style="font-size: 15px; font-weight: 500">Next workout</span>
+        <div class="seg" role="radiogroup" aria-label="Next workout" style="background: var(--bg)">
+          ${plans.map((p) => html`<button key=${p.id} role="radio" aria-checked=${p.id === next} class=${p.id === next ? 'on' : ''} onClick=${() => saveSettings({ nextPlanId: p.id })}>${planName(p)}</button>`)}
+        </div>
+        <span class="tiny muted">Switches automatically after each workout. Change it here only to break the rotation.</span>
+      </div>
+
+      <span class="section-label">Weight steps (+/−)</span>
+      <div class="card card-pad" style="gap: 14px">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+          <span>Machines & barbell</span>
+          <span style="display: flex; align-items: center; gap: 6px" class="small muted"><${NumberSetting} label="Machine step in kg" value=${s.stepMachine} onSave=${(v) => saveSettings({ stepMachine: v })} width=${72} /> kg</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px">
+          <span>Dumbbells</span>
+          <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap" class="small muted">
+            <${NumberSetting} label="Dumbbell small step in kg" value=${s.stepDbSmall} onSave=${(v) => saveSettings({ stepDbSmall: v })} /> kg up to
+            <${NumberSetting} label="Dumbbell threshold in kg" value=${s.dbThreshold} onSave=${(v) => saveSettings({ dbThreshold: v })} /> kg, then
+            <${NumberSetting} label="Dumbbell large step in kg" value=${s.stepDbLarge} onSave=${(v) => saveSettings({ stepDbLarge: v })} /> kg
+          </div>
+        </div>
+        <span class="tiny muted">Each exercise is set to Machine / barbell or Dumbbells in Plans. Tap a weight during a workout to type any value.</span>
+      </div>
+
+      <span class="section-label">During a workout</span>
+      <div class="card">
+        ${toggles.map(([key, label, hint]) => html`<div key=${key} class="row">
+          <span style="display: flex; flex-direction: column; gap: 2px"><span>${label}</span><span class="tiny muted">${hint}</span></span>
+          <button class=${'switch' + (s[key] ? ' on' : '')} role="switch" aria-checked=${!!s[key]} aria-label=${label} onClick=${() => saveSettings({ [key]: !s[key] })}><span></span></button>
+        </div>`)}
+      </div>
+
+      <span class="section-label">Data</span>
+      <div class="card card-pad" style="gap: 10px">
+        <p class="small" style="line-height: 1.45; color: var(--text-2)">Plans and logs are stored on this iPhone only. Export a backup now and then, for example to iCloud Drive.</p>
+        <span class="small muted">Last backup: ${s.lastBackup ? fmtDate(s.lastBackup, true) : 'never'} · ${d.sessions.filter((x) => x.finishedAt).length} workouts logged</span>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px">
+          <button class="btn btn-primary" onClick=${exportBackup}>Export backup</button>
+          <${ImportButton} label="Import backup" cls="btn" />
+        </div>
+      </div>
+      <p class="tiny muted" style="text-align: center; margin-top: 12px">Lift Happens ${VERSION}</p>
+    </div>
+    <${Nav} active="settings" />
+  </div>`;
+}
+
+// ======================================================================
+// App root
+// ======================================================================
+
+function App() {
+  const d = useStore();
+  if (!d.loaded) return html`<div class="boot">Lift Happens</div>`;
+  let screen;
+  if (!d.plans.length) screen = html`<${Welcome} />`;
+  else {
+    const r = d.route;
+    if (r.name === 'workout') screen = html`<${Workout} key=${r.id} id=${r.id} />`;
+    else if (r.name === 'summary') screen = html`<${Summary} id=${r.id} />`;
+    else if (r.name === 'plans') screen = html`<${Plans} />`;
+    else if (r.name === 'progress') screen = html`<${Progress} />`;
+    else if (r.name === 'settings') screen = html`<${Settings} />`;
+    else screen = html`<${Home} />`;
+  }
+  return html`${screen}${d.toast ? html`<div class="toast" role="status">${d.toast}</div>` : null}`;
+}
+
+async function boot() {
+  render(html`<${App} />`, document.getElementById('app'));
+  try {
+    const data = await db.loadAll();
+    const settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+    const open = data.sessions.find((s) => !s.finishedAt);
+    setState({
+      loaded: true,
+      exercises: data.exercises,
+      plans: data.plans,
+      sessions: data.sessions,
+      settings,
+      // Reopen a workout left open (e.g. after the app was closed mid-session).
+      route: open ? { name: 'workout', id: open.id } : { name: 'home' }
+    });
+    db.requestPersistence();
+  } catch (err) {
+    console.error(err);
+    setState({ loaded: true });
+    toast('Could not open storage: ' + (err.message || err));
+  }
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+  }
+}
+
+boot();
