@@ -3,8 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, increase, decrease, startingSets, createSession, setsFromHistory,
-  nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport
+  nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport,
+  pickDailyQuote, localDayKey
 } from '../js/logic.js';
+import { QUOTES } from '../js/quotes.js';
 
 const S = DEFAULT_SETTINGS;
 
@@ -141,4 +143,30 @@ test('summary: first workout compares with the plan starting weight', () => {
   assert.equal(sum.rows[0].record, null);
   assert.equal(sum.volLast, 660);
   assert.equal(sum.volToday, 680);
+});
+
+test('daily quote: same all day, new one the next launch day', () => {
+  const a = pickDailyQuote(null, '2026-11-17', 150);
+  assert.equal(pickDailyQuote(a, '2026-11-17', 150), a);
+  const b = pickDailyQuote(a, '2026-11-19', 150);
+  assert.equal(b.date, '2026-11-19');
+  assert.notEqual(b.index, a.index);
+});
+
+test('daily quote: no repeat within the last 100 picks', () => {
+  let q = null;
+  const seen = [];
+  for (let day = 0; day < 400; day++) {
+    q = pickDailyQuote(q, 'day-' + day, 150);
+    seen.push(q.index);
+  }
+  for (let i = 100; i < seen.length; i++) {
+    assert.ok(!seen.slice(i - 100, i).includes(seen[i]), 'repeat too soon at ' + i);
+  }
+});
+
+test('quote pool has 150 unique lines', () => {
+  assert.equal(QUOTES.length, 150);
+  assert.equal(new Set(QUOTES).size, 150);
+  assert.match(localDayKey(new Date(2026, 0, 5)), /^2026-01-05$/);
 });

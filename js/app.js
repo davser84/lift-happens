@@ -4,10 +4,11 @@ import {
   DEFAULT_SETTINGS, uid, round2, fmtNum, fmtWeight, parseNum, increase, decrease,
   createSession, startingSets, setsFromHistory, hasEmptyWeight, activePlans, nextPlanAfter,
   plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
-  validateImport, buildExport
+  validateImport, buildExport, pickDailyQuote, localDayKey
 } from './logic.js';
+import { QUOTES } from './quotes.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -88,6 +89,13 @@ function savePlan(plan) {
 function saveExercise(ex) {
   setState({ exercises: upsert(state.exercises, ex) });
   return db.put('exercises', ex).catch(failed);
+}
+
+// Picks today's quote on the first launch of the day; keeps it until midnight.
+function ensureDailyQuote() {
+  const prev = state.settings.dailyQuote;
+  const next = pickDailyQuote(prev, localDayKey(), QUOTES.length);
+  if (next && next !== prev) saveSettings({ dailyQuote: next });
 }
 
 const getSession = (id) => state.sessions.find((s) => s.id === id);
@@ -219,6 +227,7 @@ async function importFile(file) {
     if (hasData && !window.confirm('Replace all plans and history on this iPhone with this file?')) return;
     await db.replaceAll(data);
     setState({ exercises: data.exercises, plans: data.plans, sessions: data.sessions, settings: data.settings, route: { name: 'home' } });
+    ensureDailyQuote();
     toast('Imported ' + data.exercises.length + ' exercises, ' + data.plans.length + ' plans, ' + data.sessions.length + ' workouts.');
   } catch (err) {
     console.error(err);
@@ -323,6 +332,8 @@ function Home() {
     <div class="header">
       <span class="small muted">${fmtDate(new Date().toISOString(), true)}</span>
       <h1 class="title">Lift Happens</h1>
+      ${d.settings.showQuote && d.settings.dailyQuote && QUOTES[d.settings.dailyQuote.index]
+        ? html`<p class="quote">${QUOTES[d.settings.dailyQuote.index]}</p>` : null}
     </div>
     <div class="main" style="gap: 16px; padding-top: 16px">
       ${open ? html`<section class="card card-pad" style="gap: 12px; border-color: var(--accent)">
@@ -1046,7 +1057,8 @@ function Settings() {
   const next = plannedPlanId(d.plans, s);
   const toggles = [
     ['keepAwake', 'Keep screen awake', 'The display stays on while a workout is open'],
-    ['autoAdvance', 'Auto-advance', 'Open the next exercise after Done or Skip']
+    ['autoAdvance', 'Auto-advance', 'Open the next exercise after Done or Skip'],
+    ['showQuote', 'Daily quote', 'A new line on Today each day']
   ];
   return html`<div class="screen">
     <div class="header"><h1 class="title">Settings</h1></div>
@@ -1077,7 +1089,7 @@ function Settings() {
         <span class="tiny muted">Each exercise is set to Machine / barbell or Dumbbells in Plans. Tap a weight during a workout to type any value.</span>
       </div>
 
-      <span class="section-label">During a workout</span>
+      <span class="section-label">Workout and Today</span>
       <div class="card">
         ${toggles.map(([key, label, hint]) => html`<div key=${key} class="row">
           <span style="display: flex; flex-direction: column; gap: 2px"><span>${label}</span><span class="tiny muted">${hint}</span></span>
@@ -1135,6 +1147,10 @@ async function boot() {
       settings,
       // Reopen a workout left open (e.g. after the app was closed mid-session).
       route: open ? { name: 'workout', id: open.id } : { name: 'home' }
+    });
+    ensureDailyQuote();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && state.loaded) ensureDailyQuote();
     });
     db.requestPersistence();
   } catch (err) {
