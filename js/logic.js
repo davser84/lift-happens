@@ -8,8 +8,6 @@ export const DEFAULT_SETTINGS = {
   stepDbLarge: 2,
   keepAwake: true,
   autoAdvance: true,
-  showQuote: true,
-  dailyQuote: null,
   lastBackup: null
 };
 
@@ -320,26 +318,4 @@ export function buildExport(state, now = new Date()) {
     sessions: state.sessions,
     settings: state.settings
   };
-}
-
-// ---------- daily quote ----------
-
-export function localDayKey(d = new Date()) {
-  const p = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-}
-
-// Picks a quote on the first launch of a day and keeps it until midnight.
-// Recently shown quotes are left out, so none comes back too soon.
-export function pickDailyQuote(prev, dayKey, poolSize, rand = Math.random) {
-  if (!poolSize) return null;
-  if (prev && prev.date === dayKey && prev.index < poolSize) return prev;
-  const windowSize = Math.max(0, Math.min(100, poolSize - 20));
-  const recent = ((prev && prev.recent) || []).filter((i) => i < poolSize).slice(-windowSize);
-  const blocked = new Set(recent);
-  let candidates = [];
-  for (let i = 0; i < poolSize; i++) if (!blocked.has(i)) candidates.push(i);
-  if (!candidates.length) candidates = Array.from({ length: poolSize }, (_, i) => i);
-  const index = candidates[Math.min(candidates.length - 1, Math.floor(rand() * candidates.length))];
-  return { date: dayKey, index, recent: windowSize ? [...recent, index].slice(-windowSize) : [] };
 }

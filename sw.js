@@ -1,6 +1,6 @@
 // Lift Happens service worker: caches the app so it works offline.
 // Bump VERSION whenever any app file changes, so phones pick up the update.
-const VERSION = 'lift-happens-v1.1.0';
+const VERSION = 'lift-happens-v1.0.1';
 const FILES = [
   './',
   './index.html',
@@ -9,7 +9,6 @@ const FILES = [
   './js/app.js',
   './js/db.js',
   './js/logic.js',
-  './js/quotes.js',
   './js/vendor/preact-htm.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
@@ -17,7 +16,8 @@ const FILES = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(FILES)));
+  // cache: 'reload' bypasses the HTTP cache so old and new files are never mixed.
+  event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(FILES.map((f) => new Request(f, { cache: 'reload' })))));
   self.skipWaiting();
 });
 
