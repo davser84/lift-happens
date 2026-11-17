@@ -8,7 +8,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.2';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -21,6 +21,7 @@ let state = {
   sessions: [],
   settings: { ...DEFAULT_SETTINGS },
   route: { name: 'home' },
+  loadError: null,
   toast: null
 };
 const listeners = new Set();
@@ -1118,6 +1119,14 @@ function Settings() {
 
 function App() {
   const d = useStore();
+  if (d.loadError) {
+    return html`<div class="boot-error">
+      <h1>Could not open your data</h1>
+      <p>Your plans and workouts are still on this iPhone. This is usually temporary: try again.</p>
+      <button class="btn btn-primary btn-big" onClick=${() => location.reload()}>Try again</button>
+      <pre>${d.loadError}</pre>
+    </div>`;
+  }
   if (!d.loaded) return html`<div class="boot">Lift Happens</div>`;
   let screen;
   if (!d.plans.length) screen = html`<${Welcome} />`;
@@ -1134,6 +1143,7 @@ function App() {
 }
 
 async function boot() {
+  window.__liftStarted = true;
   render(html`<${App} />`, document.getElementById('app'));
   try {
     const data = await db.loadAll();
@@ -1155,9 +1165,10 @@ async function boot() {
     db.requestPersistence();
   } catch (err) {
     console.error(err);
-    setState({ loaded: true });
-    toast('Could not open storage: ' + (err.message || err));
+    // Never fall through to the empty Welcome screen: that could lead to overwriting real data.
+    setState({ loadError: String(err && err.message ? err.message : err) });
   }
+  window.__liftReady = true;
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
   }

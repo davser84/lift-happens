@@ -1,6 +1,7 @@
-// Lift Happens service worker: caches the app so it works offline.
-// Bump VERSION whenever any app file changes, so phones pick up the update.
-const VERSION = 'lift-happens-v1.1.0';
+// Lift Happens service worker.
+// Network first (always checks for the newest files when online), cache as fallback (offline at the gym).
+// Bump VERSION whenever any app file changes.
+const VERSION = 'lift-happens-v1.1.2';
 const FILES = [
   './',
   './index.html',
@@ -15,30 +16,55 @@ const FILES = [
   './icons/icon-192.png',
   './icons/icon-512.png'
 ];
+const NETWORK_TIMEOUT_MS = 4000;
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(FILES)));
+  // cache: 'reload' skips the browser's HTTP cache, so old and new files never get mixed.
+  event.waitUntil(
+    caches.open(VERSION).then((cache) => cache.addAll(FILES.map((f) => new Request(f, { cache: 'reload' }))))
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const old = keys.filter((k) => k !== VERSION);
+    await Promise.all(old.map((k) => caches.delete(k)));
+    await self.clients.claim();
+    // Open pages reload themselves on 'controllerchange' (see index.html).
+  })());
 });
 
-// Cache first for app files; the app never calls any server for data.
+function cacheKey(url) {
+  const u = new URL(url);
+  return u.origin + u.pathname;
+}
+
+function timeout(ms) {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms));
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  event.respondWith(
-    caches.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req).then((res) => {
-      if (res && res.ok) {
-        const copy = res.clone();
-        caches.open(VERSION).then((cache) => cache.put(req, copy));
-      }
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+
+  event.respondWith((async () => {
+    const cache = await caches.open(VERSION);
+    try {
+      const res = await Promise.race([fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }), timeout(NETWORK_TIMEOUT_MS)]);
+      if (res && res.ok) cache.put(cacheKey(req.url), res.clone());
       return res;
-    }).catch(() => caches.match('./index.html')))
-  );
+    } catch (err) {
+      const hit = await cache.match(cacheKey(req.url));
+      if (hit) return hit;
+      if (req.mode === 'navigate') {
+        const shell = await cache.match(cacheKey(new URL('./index.html', self.location).href));
+        if (shell) return shell;
+      }
+      return Response.error();
+    }
+  })());
 });

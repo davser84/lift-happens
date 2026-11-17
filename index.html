@@ -18,6 +18,53 @@
 <body>
 <div id="app"><div class="boot">Lift Happens</div></div>
 <noscript>Lift Happens needs JavaScript.</noscript>
+<script>
+// Start-up watchdog: if the app has not started after a few seconds, show what went wrong
+// and offer a repair that clears the cached app files (workout data is kept).
+(function () {
+  var errors = [];
+  window.addEventListener('error', function (e) {
+    errors.push((e.message || 'Error') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    errors.push('Promise: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+  });
+  window.liftRepair = function () {
+    var done = function () { location.replace(location.pathname + '?r=' + Date.now()); };
+    var steps = [];
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      steps.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+        return Promise.all(regs.map(function (r) { return r.unregister(); }));
+      }));
+    }
+    if (window.caches && caches.keys) {
+      steps.push(caches.keys().then(function (keys) {
+        return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+      }));
+    }
+    Promise.all(steps).then(done, done);
+  };
+  // When an updated service worker takes over, reload once so the page runs the new files.
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    var reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (reloading) return;
+      reloading = true;
+      location.reload();
+    });
+  }
+  setTimeout(function () {
+    if (window.__liftReady) return;
+    var box = document.getElementById('app');
+    box.innerHTML = '<div class="boot-error">' +
+      '<h1>Lift Happens did not start</h1>' +
+      '<p>Your plans and workouts are safe on this iPhone. Tap Repair to download the app files again.</p>' +
+      '<button class="btn btn-primary btn-big" onclick="liftRepair()">Repair and reload</button>' +
+      '<pre></pre></div>';
+    box.querySelector('pre').textContent = errors.length ? errors.join('\n') : 'No error message.';
+  }, 15000);
+})();
+</script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
