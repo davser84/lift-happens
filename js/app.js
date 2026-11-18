@@ -9,7 +9,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -330,7 +330,7 @@ function Welcome() {
   };
   return html`<div class="screen">
     <div class="main" style="justify-content: center; padding: calc(var(--safe-top) + var(--top-gap) + 16px) 24px 32px; gap: 18px">
-      <img src="icons/icon-180.png" width="88" height="88" alt="" style="border-radius: 20px" />
+      <${AppFace} size=${140} />
       <h1 class="title">Lift Happens</h1>
       <p class="muted" style="line-height: 1.5">Your plans, pre-filled with last time's weights. Everything stays on this iPhone.</p>
       <${ImportButton} label="Import plans or backup file" cls="btn btn-primary btn-big" />
@@ -338,6 +338,23 @@ function Welcome() {
       <p class="tiny muted">Tip: add this page to your Home Screen first (Share → Add to Home Screen), then open it from there.</p>
     </div>
   </div>`;
+}
+
+// ======================================================================
+// App face (the icon's eyes and barbell smile, without the tile)
+// ======================================================================
+
+function AppFace({ size = 88, style = '', wink = false }) {
+  const h = Math.round(size * 290 / 400);
+  if (!wink) return html`<img class="app-face" src="icons/face.png" alt="" width=${size} height=${h} style=${style} />`;
+  // Workout finished: the face appears, then winks.
+  return html`<span class="app-face face-wink" style=${'width:' + size + 'px;height:' + h + 'px;' + style}>
+    <img src="icons/face.png" alt="" width=${size} height=${h} /><img src="icons/face-wink.png" alt="" width=${size} height=${h} />
+  </span>`;
+}
+
+function EmptyState({ children }) {
+  return html`<section class="card empty-state"><${AppFace} size=${120} />${children}</section>`;
 }
 
 // ======================================================================
@@ -374,8 +391,13 @@ function Home() {
 
   return html`<div class="screen">
     <div class="header">
-      <span class="small muted">${fmtDate(new Date().toISOString(), true)}</span>
-      <h1 class="title">Lift Happens</h1>
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+        <div style="display: flex; flex-direction: column; gap: 10px; min-width: 0">
+          <span class="small muted">${fmtDate(new Date().toISOString(), true)}</span>
+          <h1 class="title">Lift Happens</h1>
+        </div>
+        <${AppFace} size=${84} />
+      </div>
       ${d.settings.showQuote && d.settings.dailyQuote && QUOTES[d.settings.dailyQuote.index]
         ? html`<p class="quote">${QUOTES[d.settings.dailyQuote.index]}</p>` : null}
     </div>
@@ -884,6 +906,7 @@ function Summary({ id }) {
 
   return html`<div class="screen">
     <div class="main" style="padding: calc(var(--safe-top) + var(--top-gap)) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
+      <${AppFace} size=${140} wink=${true} style="align-self: center" />
       <div style="display: flex; align-items: center; gap: 12px">
         <span class="check-badge" style="width: 44px; height: 44px; border-radius: 22px"><${Icon} name="check" size=${24} sw=${3} /></span>
         <div style="display: flex; flex-direction: column; gap: 2px">
@@ -1023,6 +1046,7 @@ function Plans() {
       <p class="small muted" style="line-height: 1.45">The plan sets exercises, order, sets and reps. Weight is optional: leave it empty to enter it at the gym.</p>
     </div>
     <div class="main">
+      ${plan.items.length ? null : html`<${EmptyState}><p class="muted">No exercises in ${planName(plan)} yet. Add the first one below.</p></${EmptyState}>`}
       ${plan.items.map((it, i) => {
         const ex = exOf(it.exerciseId);
         const open = openItem === it.id;
@@ -1096,7 +1120,7 @@ function WorkoutHistory() {
       <${ProgressTabs} active="workouts" />
     </div>
     <div class="main">
-      ${list.length ? null : html`<section class="card card-pad"><p class="muted">No workouts logged yet. Finished workouts show up here.</p></section>`}
+      ${list.length ? null : html`<${EmptyState}><p class="muted">No workouts logged yet. Finished workouts show up here.</p></${EmptyState}>`}
       ${shown.map((s) => {
         const plan = d.plans.find((p) => p.id === s.planId);
         const done = s.entries.filter((e) => e.status === 'done');
@@ -1224,8 +1248,8 @@ function ExerciseProgress() {
   const inPlans = (id) => activePlans(d.plans).filter((p) => p.items.some((it) => it.exerciseId === id)).map((p) => p.name).join(' + ');
 
   let body;
-  if (!ex) body = html`<p class="muted">No exercises yet.</p>`;
-  else if (!hist.length) body = html`<section class="card card-pad"><p class="muted">No sessions logged for ${ex.name} yet. Confirm it in a workout and it shows up here.</p></section>`;
+  if (!ex) body = html`<${EmptyState}><p class="muted">No exercises yet.</p></${EmptyState}>`;
+  else if (!hist.length) body = html`<${EmptyState}><p class="muted">No sessions logged for ${ex.name} yet. Confirm it in a workout and it shows up here.</p></${EmptyState}>`;
   else {
     const bw = hist.every((h) => h.top === 0);
     const unit = bw ? ' reps' : ' kg';
@@ -1279,13 +1303,13 @@ function ExerciseProgress() {
         <h2 style="margin: 0 4px; font-size: 15px; font-weight: 600">${bw ? 'Total reps per session' : 'Top-set weight per session (kg)'}</h2>
         <div class="chart">
           <svg viewBox=${'0 0 ' + W + ' 200'} aria-hidden="true">
-            ${ticks.map((t, i) => html`<g key=${i}><line x1=${L} x2=${R} y1=${Y(t)} y2=${Y(t)} stroke="#262A31" stroke-width="1" />
-              <text x=${L - 6} y=${Y(t) + 4} text-anchor="end" font-size="11" fill="#A0A6B0">${bw ? Math.round(t) : fmtNum(Math.round(t * 4) / 4)}</text></g>`)}
-            <line x1=${sx} x2=${sx} y1=${T} y2=${B} stroke="#4A505A" stroke-width="1" />
+            ${ticks.map((t, i) => html`<g key=${i}><line x1=${L} x2=${R} y1=${Y(t)} y2=${Y(t)} stroke="rgba(140,175,255,0.12)" stroke-width="1" />
+              <text x=${L - 6} y=${Y(t) + 4} text-anchor="end" font-size="11" fill="#9DA9C0">${bw ? Math.round(t) : fmtNum(Math.round(t * 4) / 4)}</text></g>`)}
+            <line x1=${sx} x2=${sx} y1=${T} y2=${B} stroke="rgba(140,175,255,0.35)" stroke-width="1" />
             ${N > 1 ? html`<polyline points=${pts.map((h, i) => X(i).toFixed(1) + ',' + Y(vals[i]).toFixed(1)).join(' ')} fill="none" stroke="#4C8DF5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />` : null}
-            ${pts.map((h, i) => html`<circle key=${i} cx=${X(i)} cy=${Y(vals[i])} r=${i === s ? 6 : 4} fill="#4C8DF5" stroke="#191C22" stroke-width="2" />`)}
-            <text x=${L} y="190" font-size="11" fill="#A0A6B0">${fmtDate(pts[0].session.startedAt)}</text>
-            <text x=${R} y="190" font-size="11" fill="#A0A6B0" text-anchor="end">${fmtDate(pts[N - 1].session.startedAt)}</text>
+            ${pts.map((h, i) => html`<circle key=${i} cx=${X(i)} cy=${Y(vals[i])} r=${i === s ? 6 : 4} fill="#4C8DF5" stroke="#16213A" stroke-width="2" />`)}
+            <text x=${L} y="190" font-size="11" fill="#9DA9C0">${fmtDate(pts[0].session.startedAt)}</text>
+            <text x=${R} y="190" font-size="11" fill="#9DA9C0" text-anchor="end">${fmtDate(pts[N - 1].session.startedAt)}</text>
           </svg>
           ${pts.map((h, i) => html`<button key=${'b' + i} aria-label=${fmtDate(h.session.startedAt) + ', ' + fmtNum(vals[i]) + unit} onClick=${() => setSel(i)}
             style=${'position:absolute;top:0;height:88%;border:0;padding:0;background:transparent;left:' + pct(X(i) - colW / 2) + ';width:' + pct(colW)}></button>`)}

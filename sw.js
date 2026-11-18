@@ -3,7 +3,7 @@
 // Bump VERSION whenever any app file changes.
 // Cache names of the regular app all start with 'lift-happens-v' (the beta uses 'lift-happens-beta-').
 const PREFIX = 'lift-happens-v';
-const VERSION = PREFIX + '1.3.1';
+const VERSION = PREFIX + '1.4.0';
 const FILES = [
   './',
   './index.html',
@@ -16,7 +16,9 @@ const FILES = [
   './js/vendor/preact-htm.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
-  './icons/icon-512.png'
+  './icons/icon-512.png',
+  './icons/face.png',
+  './icons/face-wink.png'
 ];
 const NETWORK_TIMEOUT_MS = 4000;
 
