@@ -33,4 +33,4 @@ Uses [Preact](https://preactjs.com) and [htm](https://github.com/developit/htm) 
 `beta/` holds a test version, served at `…/lift-happens/beta/` and installed as a second Home Screen app
 ("LH Beta", orange icon). It uses its own database (`lift-happens-beta`) and its own cache names, so it never
 touches the regular app's data. Move changes from `beta/` to the root only once they are confirmed.
-Note for that step: make the root `sw.js` delete only its own caches (`lift-happens-v…`), not the beta's.
+The root `sw.js` deletes only its own caches (`lift-happens-v…`); the beta's `sw.js` only `lift-happens-beta-…`.

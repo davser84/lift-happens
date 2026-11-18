@@ -6,19 +6,71 @@ const STORES = ['exercises', 'plans', 'sessions', 'meta'];
 
 let dbPromise = null;
 
-function open() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+// WebKit bug: on iPhone, indexedDB.open() can stall right after the app launches.
+// Calling indexedDB.databases() until it answers wakes it up (same idea as "safari-14-idb-fix").
+function idbReady() {
+  const ua = navigator.userAgent || '';
+  const isWebKit = /AppleWebKit\//.test(ua) && !/Chrom(e|ium)\//.test(ua);
+  if (!isWebKit || !indexedDB.databases) return Promise.resolve();
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; clearInterval(timer); resolve(); } };
+    const poke = () => { try { indexedDB.databases().then(finish, finish); } catch (e) { finish(); } };
+    const timer = setInterval(poke, 100);
+    poke();
+    setTimeout(finish, 3000);
+  });
+}
+
+function openOnce(timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error('Storage did not answer in time')); } }, timeoutMs);
+    let req;
+    try {
+      req = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch (e) {
+      clearTimeout(timer);
+      reject(e);
+      return;
+    }
     req.onupgradeneeded = () => {
       const db = req.result;
       for (const name of STORES) {
         if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: 'id' });
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      if (settled) { db.close(); return; }
+      settled = true;
+      clearTimeout(timer);
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
+    req.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(req.error); } };
+    req.onblocked = () => { /* another tab holds an old version; keep waiting until the timeout */ };
   });
+}
+
+async function openWithRetry() {
+  await idbReady();
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await openOnce(2000 + attempt * 1000);
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+  throw lastErr;
+}
+
+function open() {
+  if (!dbPromise) {
+    dbPromise = openWithRetry().catch((e) => { dbPromise = null; throw e; });
+  }
   return dbPromise;
 }
 
