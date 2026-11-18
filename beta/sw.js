@@ -2,7 +2,7 @@
 // Network first (always checks for the newest files when online), cache as fallback (offline at the gym).
 // Bump VERSION whenever any app file changes.
 const PREFIX = 'lift-happens-beta-';
-const VERSION = PREFIX + 'v1.2.0';
+const VERSION = PREFIX + 'v1.2.1';
 const FILES = [
   './',
   './index.html',

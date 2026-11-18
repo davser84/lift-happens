@@ -8,7 +8,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.2.0-beta';
+const VERSION = '1.2.1-beta';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -288,7 +288,7 @@ function Welcome() {
     go({ name: 'plans' });
   };
   return html`<div class="screen">
-    <div class="main" style="justify-content: center; padding: calc(var(--safe-top) + 32px) 24px 32px; gap: 18px">
+    <div class="main" style="justify-content: center; padding: calc(var(--safe-top) + var(--top-gap) + 16px) 24px 32px; gap: 18px">
       <img src="icons/icon-180.png" width="88" height="88" alt="" style="border-radius: 20px" />
       <h1 class="title">Lift Happens <span class="beta-chip">BETA</span></h1>
       <p class="muted" style="line-height: 1.5">Test version. Its data is separate from the regular app: import your plans file or a backup exported from the regular app.</p>
@@ -722,7 +722,7 @@ function Summary({ id }) {
   };
 
   return html`<div class="screen">
-    <div class="main" style="padding: calc(var(--safe-top) + 24px) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
+    <div class="main" style="padding: calc(var(--safe-top) + var(--top-gap)) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
       <div style="display: flex; align-items: center; gap: 12px">
         <span class="check-badge" style="width: 44px; height: 44px; border-radius: 22px"><${Icon} name="check" size=${24} sw=${3} /></span>
         <div style="display: flex; flex-direction: column; gap: 2px">
