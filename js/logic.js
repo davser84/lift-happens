@@ -150,6 +150,8 @@ export function createSession(plan, sessions, now = new Date()) {
       replacesExerciseId: null,
       status: 'open',
       doneAt: null,
+      plannedSets: item.sets,
+      reminder: null,
       sets: startingSets(item, sessions, opts)
     }))
   };
@@ -342,4 +344,58 @@ export function pickDailyQuote(prev, dayKey, poolSize, rand = Math.random) {
   if (!candidates.length) candidates = Array.from({ length: poolSize }, (_, i) => i);
   const index = candidates[Math.min(candidates.length - 1, Math.floor(rand() * candidates.length))];
   return { date: dayKey, index, recent: windowSize ? [...recent, index].slice(-windowSize) : [] };
+}
+
+// ---------- reminders for next time ----------
+
+export const SCHEMES = [{ sets: 3, reps: 8 }, { sets: 4, reps: 6 }, { sets: 5, reps: 5 }, { sets: 6, reps: 4 }];
+export const schemeLabel = (sc) => sc.sets + ' × ' + sc.reps;
+
+export function hasReminder(r) {
+  return !!r && (r.dir === 'up' || r.dir === 'down' || !!r.scheme || !!(r.note && r.note.trim()));
+}
+
+// The reminder waiting for an exercise: the latest one set in another workout, unless the
+// exercise has been confirmed (Done) in a workout started after that one.
+// Derived from the log only, so cancelling or deleting a workout also removes its reminders.
+export function pendingReminder(sessions, exerciseId, currentSessionId) {
+  let best = null;
+  for (const s of sessions) {
+    if (s.id === currentSessionId) continue;
+    for (const e of s.entries || []) {
+      if (e.exerciseId !== exerciseId || !hasReminder(e.reminder)) continue;
+      if (!best || ts(s.startedAt) > ts(best.session.startedAt)) best = { session: s, entry: e, reminder: e.reminder };
+    }
+  }
+  if (!best) return null;
+  const since = ts(best.session.startedAt);
+  for (const s of sessions) {
+    if (s.id === currentSessionId || s.id === best.session.id || ts(s.startedAt) <= since) continue;
+    if ((s.entries || []).some((e) => e.exerciseId === exerciseId && e.status === 'done')) return null;
+  }
+  return best;
+}
+
+// New set count and reps; weights kept set by set (extra sets copy the last one).
+export function applyScheme(sets, scheme) {
+  const weights = sets.map((x) => x.weight);
+  const out = [];
+  for (let i = 0; i < scheme.sets; i++) {
+    const w = weights.length ? (i < weights.length ? weights[i] : weights[weights.length - 1]) : null;
+    out.push({ weight: w, reps: scheme.reps });
+  }
+  return out;
+}
+
+export function currentScheme(sets) {
+  if (!sets.length) return null;
+  const r = sets[0].reps;
+  return sets.every((x) => x.reps === r) ? { sets: sets.length, reps: r } : null;
+}
+
+// After deleting a finished workout: if it was the latest one, its plan is up next again.
+export function nextPlanAfterDelete(sessions, deleted, settings) {
+  if (!deleted.finishedAt) return settings.nextPlanId;
+  const later = sessions.some((s) => s.id !== deleted.id && s.finishedAt && ts(s.finishedAt) > ts(deleted.finishedAt));
+  return later ? settings.nextPlanId : deleted.planId;
 }

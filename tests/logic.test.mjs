@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, increase, decrease, startingSets, createSession, setsFromHistory,
   nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport,
-  pickDailyQuote, localDayKey
+  pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder
 } from '../js/logic.js';
 import { QUOTES } from '../js/quotes.js';
 
@@ -169,4 +169,50 @@ test('quote pool has 150 unique lines', () => {
   assert.equal(QUOTES.length, 150);
   assert.equal(new Set(QUOTES).size, 150);
   assert.match(localDayKey(new Date(2026, 0, 5)), /^2026-01-05$/);
+});
+
+const sess = (id, startedAt, entries, finishedAt = startedAt) => ({ id, planId: 'A', startedAt, finishedAt, entries });
+const ent = (exerciseId, status, reminder = null) => ({ id: exerciseId + '-' + Math.random(), exerciseId, status, reminder, sets: [{ weight: 20, reps: 8 }] });
+
+test('reminder: shown in the next workout with that exercise, in any plan', () => {
+  const s1 = sess('s1', '2026-11-10T10:00:00Z', [ent('x', 'done', { dir: 'up' })]);
+  const s2 = sess('s2', '2026-11-12T10:00:00Z', [ent('y', 'done')]);
+  const cur = sess('s3', '2026-11-14T10:00:00Z', [ent('x', 'open')], null);
+  const r = pendingReminder([s1, s2, cur], 'x', 's3');
+  assert.equal(r.reminder.dir, 'up');
+  assert.equal(pendingReminder([s1, s2, cur], 'x', 's1'), null, 'not shown in the workout where it was set');
+});
+
+test('reminder: cleared once the exercise is Done in a later workout, kept if skipped', () => {
+  const s1 = sess('s1', '2026-11-10T10:00:00Z', [ent('x', 'done', { scheme: { sets: 5, reps: 5 } })]);
+  const skipped = sess('s2', '2026-11-12T10:00:00Z', [ent('x', 'skipped')]);
+  assert.ok(pendingReminder([s1, skipped], 'x', 'now'));
+  const done = sess('s3', '2026-11-14T10:00:00Z', [ent('x', 'done')]);
+  assert.equal(pendingReminder([s1, skipped, done], 'x', 'now'), null);
+  assert.ok(pendingReminder([s1, skipped, done], 'x', 's3'), 'still shown inside the workout where it gets done, until Done');
+});
+
+test('reminder: latest one wins, empty reminders ignored', () => {
+  const s1 = sess('s1', '2026-11-10T10:00:00Z', [ent('x', 'done', { dir: 'up' })]);
+  const s2 = sess('s2', '2026-11-12T10:00:00Z', [ent('x', 'done', { dir: null, scheme: null, note: '  ' })]);
+  assert.equal(hasReminder(s2.entries[0].reminder), false);
+  assert.equal(pendingReminder([s1, s2], 'x', 'now'), null, 'done in s2 after the reminder of s1');
+  const s3 = sess('s3', '2026-11-13T10:00:00Z', [ent('x', 'done', { note: 'seat 4' })]);
+  assert.equal(pendingReminder([s1, s2, s3], 'x', 'now').reminder.note, 'seat 4');
+});
+
+test('apply scheme keeps weights set by set', () => {
+  const sets = [{ weight: 20, reps: 8 }, { weight: 22.5, reps: 8 }, { weight: 25, reps: 8 }];
+  assert.deepEqual(applyScheme(sets, { sets: 5, reps: 5 }), [20, 22.5, 25, 25, 25].map((w) => ({ weight: w, reps: 5 })));
+  assert.deepEqual(applyScheme(sets, { sets: 2, reps: 10 }), [{ weight: 20, reps: 10 }, { weight: 22.5, reps: 10 }]);
+  assert.deepEqual(currentScheme(sets), { sets: 3, reps: 8 });
+  assert.equal(currentScheme([{ weight: 1, reps: 8 }, { weight: 1, reps: 7 }]), null);
+});
+
+test('rotation goes back only when the latest workout is deleted', () => {
+  const a = { id: 'a', planId: 'A', finishedAt: '2026-11-10T11:00:00Z' };
+  const b = { id: 'b', planId: 'B', finishedAt: '2026-11-12T11:00:00Z' };
+  const settings = { nextPlanId: 'A' };
+  assert.equal(nextPlanAfterDelete([a, b], b, settings), 'B');
+  assert.equal(nextPlanAfterDelete([a, b], a, settings), 'A');
 });
