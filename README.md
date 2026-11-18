@@ -27,3 +27,10 @@ No build step. Serve the folder with any static server, e.g. `python3 -m http.se
 Logic tests: `node --test tests/logic.test.mjs`.
 
 Uses [Preact](https://preactjs.com) and [htm](https://github.com/developit/htm) (MIT), vendored in `js/vendor/`.
+
+## Beta
+
+`beta/` holds a test version, served at `…/lift-happens/beta/` and installed as a second Home Screen app
+("LH Beta", orange icon). It uses its own database (`lift-happens-beta`) and its own cache names, so it never
+touches the regular app's data. Move changes from `beta/` to the root only once they are confirmed.
+Note for that step: make the root `sw.js` delete only its own caches (`lift-happens-v…`), not the beta's.
