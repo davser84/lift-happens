@@ -8,7 +8,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.2.1-beta';
+const VERSION = '1.2.2-beta';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
