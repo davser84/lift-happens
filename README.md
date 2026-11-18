@@ -30,7 +30,8 @@ Uses [Preact](https://preactjs.com) and [htm](https://github.com/developit/htm) 
 
 ## Beta
 
-`beta/` holds a test version, served at `…/lift-happens/beta/` and installed as a second Home Screen app
-("LH Beta", orange icon). It uses its own database (`lift-happens-beta`) and its own cache names, so it never
-touches the regular app's data. Move changes from `beta/` to the root only once they are confirmed.
+`beta/` holds a fallback copy, served at `…/lift-happens/beta/` and installed as a second Home Screen app
+("LH Beta", orange icon), with its own database (`lift-happens-beta`) and cache names.
+Changes go straight to the regular app. The beta is only used if a release breaks the regular app:
+then the root is reverted to the previous version and the work continues in `beta/` until it is fixed.
 The root `sw.js` deletes only its own caches (`lift-happens-v…`); the beta's `sw.js` only `lift-happens-beta-…`.
