@@ -215,3 +215,6 @@ h1, h2, h3, p { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
 .btn-go { background: linear-gradient(180deg, #6FE3A2 0%, #22B46A 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 6px 16px rgba(20,140,80,0.35); color: #06210F; font-weight: 600; }
 .btn-danger-text { color: var(--danger); font-weight: 600; }
+/* the exercise being done: same green as the workout in progress */
+.ex-card.live { border-color: rgba(52,199,123,0.55); box-shadow: 0 0 0 1px rgba(52,199,123,0.18), 0 10px 28px rgba(20,120,70,0.16); }
+.ex-name .live-dot { flex-shrink: 0; margin-right: 2px; }

@@ -9,7 +9,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.5.1';
+const VERSION = '1.5.2';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -741,11 +741,11 @@ function Workout({ id }) {
 
     return html`<div key=${e.id} class="swipe-wrap">
       ${dx > 0 ? html`<div class="swipe-under" style=${'opacity:' + Math.min(1, dx / 90)}><span><${Icon} name="check" sw=${3} /> Done</span></div>` : null}
-      <section class=${'card ex-card' + (open ? ' open' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
+      <section class=${'card ex-card' + (open ? ' open' : '') + (open && e.status === 'open' ? ' live' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
         <button class="ex-head" aria-expanded=${open} ...${swipeHandlers(e, canSwipe)}
           onClick=${() => { if (suppressClick.current) return; clearEdit(); setOpenId(open ? null : e.id); }}>
           <div class="ex-head-text">
-            <span class="ex-name">${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
+            <span class="ex-name">${open && e.status === 'open' ? html`<span class="live-dot" aria-label="In progress"></span>` : null}${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
             <span class="small muted num">${e.sets.length} × ${rTxt} · ${wTxt}</span>
             ${tags.length ? html`<span class="ex-tag">${tags.join(' · ')}</span>` : null}
             ${inChips.length ? html`<span class="rem-chips">${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}</span>` : null}
