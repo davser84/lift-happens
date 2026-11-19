@@ -46,6 +46,9 @@ h1, h2, h3, p { margin: 0; }
 .tiny { font-size: 12px; }
 .boot { height: var(--app-h, 100vh); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: var(--bg-gradient, var(--bg)); color: var(--title, var(--text)); font-family: var(--font-rounded, inherit); font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
 .boot img { height: auto; }
+/* Start screen: invisible on a normal start (it would only flash for a frame); fades in only if loading takes over a second. */
+.boot { opacity: 0; animation: boot-in 0.3s ease-out 1s forwards; }
+@keyframes boot-in { to { opacity: 1; } }
 
 /* ---------- layout ---------- */
 #app { position: relative; height: var(--app-h, 100%); overflow: hidden; }
