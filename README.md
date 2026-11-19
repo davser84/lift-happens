@@ -39,7 +39,7 @@ The root `sw.js` deletes only its own caches (`lift-happens-v…`); the beta's `
 
 ## License
 
-Lift Happens © 2026 Davide — licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
+Lift Happens © 2026 [davser84](https://github.com/davser84) — licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
 
 You may use, copy, modify and share it. Any modified version you distribute or offer to others,
 including over a network, must stay under the same license and come with its full source code.
