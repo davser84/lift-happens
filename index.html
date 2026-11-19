@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Lift Happens</title>
 <meta name="description" content="Personal gym plan and log">
 <meta name="theme-color" content="#0A1222">
@@ -22,6 +22,10 @@
 // Start-up watchdog: if the app has not started after a few seconds, show what went wrong
 // and offer a repair that clears the cached app files (workout data is kept).
 (function () {
+  // No zooming: block iOS pinch gestures (Safari ignores user-scalable=no on its own).
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (type) {
+    document.addEventListener(type, function (e) { e.preventDefault(); }, { passive: false });
+  });
   var errors = [];
   window.addEventListener('error', function (e) {
     errors.push((e.message || 'Error') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));

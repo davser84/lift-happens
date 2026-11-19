@@ -30,7 +30,7 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; height: 100%; background: var(--bg-gradient) fixed; background-color: var(--bg); color: var(--text); }
+html, body { margin: 0; height: 100%; touch-action: manipulation; background: var(--bg-gradient) fixed; background-color: var(--bg); color: var(--text); }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
   font-size: 16px;
@@ -69,6 +69,10 @@ h1, h2, h3, p { margin: 0; }
 .icon-btn { width: 44px; height: 44px; border: 0; background: transparent; color: var(--text); display: inline-flex; align-items: center; justify-content: center; border-radius: 12px; padding: 0; }
 .back { margin-left: -12px; }
 .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Exercise actions: always one row; Setup and Reminder are icon-only. */
+.act-row { display: flex; gap: 6px; flex-wrap: nowrap; }
+.act-row .btn { flex: 1 1 0; min-width: 0; padding: 0 8px; gap: 5px; white-space: nowrap; }
+.act-row .btn.act-icon { flex: 0 0 44px; width: 44px; padding: 0; }
 .link { color: var(--accent); }
 
 /* ---------- cards ---------- */

@@ -9,7 +9,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -174,6 +174,7 @@ const P = {
   chevron: 'M6 9l6 6 6-6',
   bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
+  next: 'M9 6l6 6-6 6',
   trash: 'M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3'
 };
 
@@ -421,11 +422,15 @@ function Home() {
       <section style="display: flex; flex-direction: column; gap: 8px">
         <span class="section-label">Rotation</span>
         <div style="display: flex; gap: 8px">
-          <div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
-            <span class="small muted">Last workout</span>
-            <span style="font-size: 17px; font-weight: 600">${last ? planName(lastPlan) : '—'}</span>
-            ${last ? html`<span class="tiny muted">${fmtDate(last.finishedAt, true)}</span>` : null}
-          </div>
+          ${last ? html`<button class="card card-pad tile-link" style="flex: 1; padding: 14px; gap: 4px; text-align: left" aria-label=${'Last workout: ' + planName(lastPlan) + ', ' + fmtDate(last.finishedAt, true) + '. Open its log'}
+              onClick=${() => go({ name: 'session', id: last.id, from: 'home' })}>
+              <span class="small muted" style="display: flex; justify-content: space-between; align-items: center; width: 100%">Last workout <${Icon} name="next" size=${16} /></span>
+              <span style="font-size: 17px; font-weight: 600">${planName(lastPlan)}</span>
+              <span class="tiny muted">${fmtDate(last.finishedAt, true)}</span>
+            </button>` : html`<div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
+              <span class="small muted">Last workout</span>
+              <span style="font-size: 17px; font-weight: 600">—</span>
+            </div>`}
           <div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
             <span class="small muted">After this one</span>
             <span style="font-size: 17px; font-weight: 600">${afterToday ? planName(afterToday) : '—'}</span>
@@ -776,14 +781,14 @@ function Workout({ id }) {
             </div>`;
           })}
           ${setupOpen[e.id] && ex.setup ? html`<div class="note-box"><${Icon} name="wrench" size=${18} /><span>Machine setup: <strong>${ex.setup}</strong></span></div>` : null}
-          <div class="btn-row" style="margin-top: 6px">
+          <div class="act-row" style="margin-top: 6px">
             <button class="btn" onClick=${() => patchEntry(e.id, (x) => ({ ...x, sets: [...x.sets, { ...x.sets[x.sets.length - 1] }] }))}><${Icon} name="plus" size=${16} sw=${2.2} /> Set</button>
             ${e.kind === 'added' ? null : e.kind === 'swapped'
-              ? html`<button class="btn" onClick=${() => undoSwap(e)}><${Icon} name="swap" size=${16} /> Undo swap</button>`
+              ? html`<button class="btn" aria-label="Undo swap" onClick=${() => undoSwap(e)}><${Icon} name="swap" size=${16} /> Undo</button>`
               : html`<button class="btn" onClick=${() => setSheet({ mode: 'swap', entryId: e.id, from: ex.name })}><${Icon} name="swap" size=${16} /> Swap</button>`}
             <button class="btn" onClick=${() => skip(e)}><${Icon} name=${e.kind === 'added' ? 'x' : 'skip'} size=${16} /> ${e.kind === 'added' ? 'Remove' : 'Skip'}</button>
-            ${ex.setup ? html`<button class="btn" aria-pressed=${!!setupOpen[e.id]} onClick=${() => setSetupOpen({ ...setupOpen, [e.id]: !setupOpen[e.id] })}><${Icon} name="wrench" size=${16} /> Setup</button>` : null}
-            <button class=${'btn' + (outRem ? ' btn-marked' : '')} aria-expanded=${remOpen} onClick=${() => setRemPanel(remOpen ? null : e.id)}><${Icon} name="bell" size=${16} /> Reminder</button>
+            ${ex.setup ? html`<button class="btn act-icon" aria-label="Machine setup" title="Machine setup" aria-pressed=${!!setupOpen[e.id]} onClick=${() => setSetupOpen({ ...setupOpen, [e.id]: !setupOpen[e.id] })}><${Icon} name="wrench" size=${18} /></button>` : null}
+            <button class=${'btn act-icon' + (outRem ? ' btn-marked' : '')} aria-label="Reminder for next time" title="Reminder" aria-expanded=${remOpen} onClick=${() => setRemPanel(remOpen ? null : e.id)}><${Icon} name="bell" size=${18} /></button>
           </div>
           ${remOpen ? html`<div class="rem-panel">
             <span class="rem-label" style="color: var(--muted)">For next time</span>
@@ -1152,7 +1157,7 @@ function WorkoutHistory() {
   </div>`;
 }
 
-function SessionDetail({ id }) {
+function SessionDetail({ id, from }) {
   const d = useStore();
   const [confirm, setConfirm] = useState(false);
   const session = d.sessions.find((s) => s.id === id);
@@ -1175,14 +1180,14 @@ function SessionDetail({ id }) {
   };
   const del = () => {
     setConfirm(false);
-    go({ name: 'progress' });
+    go({ name: from === 'home' ? 'home' : 'progress' });
     removeSession(session);
     toast('Workout deleted.');
   };
 
   return html`<div class="screen">
     <div class="header" style="gap: 6px">
-      <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />Workouts</button>
+      <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: from === 'home' ? 'home' : 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />${from === 'home' ? 'Today' : 'Workouts'}</button>
       <h1 class="title">${planName(plan)}</h1>
       <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}–${hhmm(session.finishedAt)} · ${durationText(session)}</span>
     </div>
@@ -1456,7 +1461,7 @@ function App() {
     else if (r.name === 'summary') screen = html`<${Summary} id=${r.id} />`;
     else if (r.name === 'plans') screen = html`<${Plans} />`;
     else if (r.name === 'progress') screen = html`<${Progress} />`;
-    else if (r.name === 'session') screen = html`<${SessionDetail} key=${r.id} id=${r.id} />`;
+    else if (r.name === 'session') screen = html`<${SessionDetail} key=${r.id} id=${r.id} from=${r.from} />`;
     else if (r.name === 'settings') screen = html`<${Settings} />`;
     else screen = html`<${Home} />`;
   }
