@@ -120,7 +120,8 @@ export function startingSets(item, sessions, opts = {}) {
   } else if (planW !== null) {
     weights = spread([planW], count);
   } else {
-    weights = spread([], count);
+    // Never logged and no plan weight: the exercise's starting weight, if it has one.
+    weights = spread(opts.fallbackWeight === null || opts.fallbackWeight === undefined ? [] : [opts.fallbackWeight], count);
   }
   return weights.map((w) => ({ weight: w, reps: item.reps }));
 }
@@ -128,13 +129,15 @@ export function startingSets(item, sessions, opts = {}) {
 // Starting sets for an exercise that is not (or no longer) the plan item: swap or add.
 export function setsFromHistory(exerciseId, count, reps, sessions, opts = {}) {
   const prev = lastDone(sessions, exerciseId, opts);
-  const weights = prev ? spread(prev.entry.sets.map((x) => x.weight), count) : spread([], count);
+  const fb = opts.fallbackWeight === null || opts.fallbackWeight === undefined ? [] : [opts.fallbackWeight];
+  const weights = prev ? spread(prev.entry.sets.map((x) => x.weight), count) : spread(fb, count);
   return weights.map((w) => ({ weight: w, reps: reps }));
 }
 
-export function createSession(plan, sessions, now = new Date()) {
+export function createSession(plan, sessions, now = new Date(), exercisesById = {}) {
   const id = uid();
   const opts = { excludeSessionId: id };
+  const startW = (exId) => (exercisesById[exId] ? exercisesById[exId].startWeight : null);
   return {
     id,
     planId: plan.id,
@@ -152,7 +155,7 @@ export function createSession(plan, sessions, now = new Date()) {
       doneAt: null,
       plannedSets: item.sets,
       reminder: null,
-      sets: startingSets(item, sessions, opts)
+      sets: startingSets(item, sessions, { ...opts, fallbackWeight: startW(item.exerciseId) })
     }))
   };
 }
@@ -283,6 +286,30 @@ export function setsText(sets) {
 
 // ---------- import / export ----------
 
+const numOrNull = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+const normName = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// A file with only exercises: added to the catalog, nothing else changes.
+// Exercises whose name (or id) is already in the catalog are skipped.
+export function mergeExercisesFile(data, existing) {
+  if (!data || data.app !== 'lift-happens' || !Array.isArray(data.exercises)) throw new Error('Not a Lift Happens exercises file.');
+  const names = new Set(existing.map((e) => normName(e.name)));
+  const ids = new Set(existing.map((e) => e.id));
+  const added = [], skipped = [];
+  for (const e of data.exercises) {
+    const name = String(e.name || '').trim();
+    if (!name) continue;
+    if (names.has(normName(name)) || (e.id && ids.has(e.id))) { skipped.push(name); continue; }
+    const ex = {
+      id: e.id || uid(), name, equipment: e.equipment === 'dumbbell' ? 'dumbbell' : 'machine',
+      setup: e.setup || '', notes: e.notes || '', archived: false, startWeight: numOrNull(e.startWeight)
+    };
+    names.add(normName(name)); ids.add(ex.id);
+    added.push(ex);
+  }
+  return { added, skipped };
+}
+
 export function validateImport(data) {
   if (!data || typeof data !== 'object') throw new Error('Not a Lift Happens file.');
   if (data.app !== 'lift-happens') throw new Error('Not a Lift Happens file.');
@@ -295,7 +322,8 @@ export function validateImport(data) {
   return {
     exercises: data.exercises.map((e) => ({
       id: e.id, name: String(e.name), equipment: e.equipment === 'dumbbell' ? 'dumbbell' : 'machine',
-      setup: e.setup || '', notes: e.notes || '', archived: !!e.archived
+      setup: e.setup || '', notes: e.notes || '', archived: !!e.archived,
+      startWeight: numOrNull(e.startWeight)
     })),
     plans: data.plans.map((p, i) => ({
       id: p.id, name: String(p.name), order: typeof p.order === 'number' ? p.order : i, archived: !!p.archived,

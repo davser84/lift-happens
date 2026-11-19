@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, increase, decrease, startingSets, createSession, setsFromHistory,
   nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport,
-  pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder
+  pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder, mergeExercisesFile
 } from '../js/logic.js';
 import { QUOTES } from '../js/quotes.js';
 
@@ -215,4 +215,29 @@ test('rotation goes back only when the latest workout is deleted', () => {
   const settings = { nextPlanId: 'A' };
   assert.equal(nextPlanAfterDelete([a, b], b, settings), 'B');
   assert.equal(nextPlanAfterDelete([a, b], a, settings), 'A');
+});
+
+test('start weight is used only until the exercise has a log', () => {
+  const item = { id: 'i', exerciseId: 'x', sets: 3, reps: 8, weight: null };
+  const ex = { x: { id: 'x', startWeight: 72.5 } };
+  const s0 = createSession({ id: 'A', items: [item] }, [], new Date('2026-11-19T10:00:00Z'), ex);
+  assert.deepEqual(s0.entries[0].sets.map((x) => x.weight), [72.5, 72.5, 72.5]);
+  const logged = [{ id: 'p', planId: 'A', startedAt: '2026-11-18T10:00:00Z', finishedAt: '2026-11-18T11:00:00Z', entries: [{ id: 'e', exerciseId: 'x', status: 'done', sets: [{ weight: 75, reps: 8 }] }] }];
+  const s1 = createSession({ id: 'A', items: [item] }, logged, new Date('2026-11-19T10:00:00Z'), ex);
+  assert.deepEqual(s1.entries[0].sets.map((x) => x.weight), [75, 75, 75]);
+  assert.deepEqual(setsFromHistory('x', 2, 8, [], { fallbackWeight: 12 }).map((x) => x.weight), [12, 12]);
+});
+
+test('exercises file is merged by name, duplicates skipped', () => {
+  const existing = [{ id: 'face_pull', name: 'Face Pull' }];
+  const r = mergeExercisesFile({ app: 'lift-happens', kind: 'exercises', exercises: [
+    { id: 'lat', name: 'Lat Pulldown', equipment: 'machine', startWeight: 72.5 },
+    { name: ' face pull ' },
+    { name: 'Dumbbell Shrugs', equipment: 'dumbbell', startWeight: '26' }
+  ] }, existing);
+  assert.deepEqual(r.added.map((e) => e.name), ['Lat Pulldown', 'Dumbbell Shrugs']);
+  assert.deepEqual(r.skipped, ['face pull']);
+  assert.equal(r.added[1].startWeight, 26);
+  assert.equal(r.added[1].equipment, 'dumbbell');
+  assert.throws(() => mergeExercisesFile({ app: 'x' }, existing));
 });

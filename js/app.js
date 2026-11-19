@@ -5,11 +5,11 @@ import {
   createSession, startingSets, setsFromHistory, hasEmptyWeight, activePlans, nextPlanAfter,
   plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
   validateImport, buildExport, pickDailyQuote, localDayKey,
-  pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete
+  pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.4.1';
+const VERSION = '1.5.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -234,7 +234,10 @@ function ExercisePicker({ title, sub, exclude, onPick, onClose, showLast }) {
 
 function lastWeightText(exId) {
   const h = exerciseHistory(state.sessions, exId);
-  if (!h.length) return '';
+  if (!h.length) {
+    const ex = state.exercises.find((e) => e.id === exId);
+    return ex && ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtWeight(ex.startWeight) : '';
+  }
   const last = h[h.length - 1];
   return last.top === 0 ? 'bodyweight' : 'last ' + fmtNum(last.top) + ' kg';
 }
@@ -264,10 +267,26 @@ function useWakeLock(enabled) {
 // Import / export
 // ======================================================================
 
+// Adds the exercises of a file to the catalog; plans, workouts and settings are not touched.
+async function addExercisesFromFile(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    const { added, skipped } = mergeExercisesFile(data, state.exercises);
+    if (added.length) await db.putMany('exercises', added);
+    setState({ exercises: [...state.exercises, ...added] });
+    toast('Added ' + added.length + (added.length === 1 ? ' exercise' : ' exercises') + (skipped.length ? ', skipped ' + skipped.length + ' already in the catalog' : '') + '.');
+  } catch (err) {
+    console.error(err);
+    toast(err instanceof SyntaxError ? 'This file is not valid JSON.' : err.message);
+  }
+}
+
 async function importFile(file) {
   try {
     const text = await file.text();
-    const data = validateImport(JSON.parse(text));
+    const raw = JSON.parse(text);
+    if (raw && raw.kind === 'exercises' && state.plans.length) { await addExercisesFromFile(file); return; }
+    const data = validateImport(raw);
     const hasData = state.plans.length || state.sessions.length;
     if (hasData && !window.confirm('Replace all plans and history on this iPhone with this file?')) return;
     await db.replaceAll(data);
@@ -280,12 +299,12 @@ async function importFile(file) {
   }
 }
 
-function ImportButton({ label, cls }) {
+function ImportButton({ label, cls, onFile }) {
   const ref = useRef(null);
-  return html`<span>
+  return html`<span style="display: grid">
     <button class=${cls || 'btn'} onClick=${() => ref.current && ref.current.click()}>${label}</button>
     <input ref=${ref} type="file" accept="application/json,.json" style="display: none"
-      onChange=${(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) importFile(f); }} />
+      onChange=${(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) (onFile || importFile)(f); }} />
   </span>`;
 }
 
@@ -379,7 +398,7 @@ function Home() {
   const start = () => {
     if (!plan) return;
     if (!plan.items.length) { toast('This plan has no exercises yet. Add some in Plans.'); return; }
-    const s = createSession(plan, d.sessions);
+    const s = createSession(plan, d.sessions, new Date(), exMap());
     saveSession(s);
     go({ name: 'workout', id: s.id });
   };
@@ -543,7 +562,7 @@ function Workout({ id }) {
         ...e, kind: 'swapped', status: 'open', doneAt: null,
         replacesExerciseId: e.kind === 'swapped' ? e.replacesExerciseId : e.exerciseId,
         exerciseId: exId, plannedSets: count, appliedScheme: null,
-        sets: setsFromHistory(exId, count, reps, state.sessions, opts)
+        sets: setsFromHistory(exId, count, reps, state.sessions, { ...opts, fallbackWeight: (exById[exId] || {}).startWeight })
       };
     });
     setOpenId(entryId);
@@ -554,7 +573,9 @@ function Workout({ id }) {
     patchEntry(e.id, (x) => ({
       ...x, kind: 'planned', exerciseId: x.replacesExerciseId, replacesExerciseId: null, status: 'open', doneAt: null,
       plannedSets: item ? item.sets : x.plannedSets, appliedScheme: null,
-      sets: item ? startingSets(item, state.sessions, opts) : setsFromHistory(x.replacesExerciseId, x.sets.length, x.sets[0].reps, state.sessions, opts)
+      sets: item
+        ? startingSets(item, state.sessions, { ...opts, fallbackWeight: (exById[x.replacesExerciseId] || {}).startWeight })
+        : setsFromHistory(x.replacesExerciseId, x.sets.length, x.sets[0].reps, state.sessions, { ...opts, fallbackWeight: (exById[x.replacesExerciseId] || {}).startWeight })
     }));
   };
 
@@ -565,7 +586,7 @@ function Workout({ id }) {
       const order = list.reduce((m, x) => Math.max(m, x.order), -1) + 1;
       return [...list, {
         id: newId, order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
-        status: 'open', doneAt: null, plannedSets: null, reminder: null, sets: setsFromHistory(exId, 3, 8, state.sessions, opts)
+        status: 'open', doneAt: null, plannedSets: null, reminder: null, sets: setsFromHistory(exId, 3, 8, state.sessions, { ...opts, fallbackWeight: (exById[exId] || {}).startWeight })
       }];
     });
     setOpenId(newId);
@@ -1364,6 +1385,110 @@ function ExerciseProgress() {
 // Settings
 // ======================================================================
 
+function ExerciseEditor({ ex, inPlans, hasLog }) {
+  const [name, setName] = useState(ex.name);
+  const [setup, setSetup] = useState(ex.setup || '');
+  const [startW, setStartW] = useState(ex.startWeight === null || ex.startWeight === undefined ? '' : fmtNum(ex.startWeight));
+  const save = (patch) => saveExercise({ ...ex, ...patch });
+  const commitName = () => {
+    const n = name.trim();
+    if (!n) { setName(ex.name); return; }
+    const clash = state.exercises.some((e) => e.id !== ex.id && e.name.trim().toLowerCase() === n.toLowerCase());
+    if (clash) { toast('Another exercise already has this name.'); setName(ex.name); return; }
+    if (n !== ex.name) save({ name: n });
+  };
+  const commitStart = () => {
+    const v = parseNum(startW);
+    const val = startW.trim() === '' || Number.isNaN(v) || v < 0 ? null : round2(v);
+    setStartW(val === null ? '' : fmtNum(val));
+    if (val !== (ex.startWeight ?? null)) save({ startWeight: val });
+  };
+  const blurOnEnter = (e) => { if (e.key === 'Enter') e.target.blur(); };
+  return html`<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line)">
+    <label class="field">Name (renames it everywhere, history included)
+      <input class="input" value=${name} onInput=${(e) => setName(e.target.value)} onBlur=${commitName} onKeyDown=${blurOnEnter} />
+    </label>
+    <div class="field">Equipment
+      <div class="seg" role="radiogroup" aria-label="Equipment">
+        <button role="radio" aria-checked=${ex.equipment !== 'dumbbell'} class=${ex.equipment !== 'dumbbell' ? 'on' : ''} onClick=${() => save({ equipment: 'machine' })}>Machine / barbell</button>
+        <button role="radio" aria-checked=${ex.equipment === 'dumbbell'} class=${ex.equipment === 'dumbbell' ? 'on' : ''} onClick=${() => save({ equipment: 'dumbbell' })}>Dumbbells</button>
+      </div>
+    </div>
+    <label class="field">Starting weight, kg
+      <input class="input" inputmode="decimal" placeholder="optional" value=${startW} onInput=${(e) => setStartW(e.target.value.replace(/[^0-9.,]/g, ''))} onBlur=${commitStart} onKeyDown=${blurOnEnter} />
+      <span class="tiny muted" style="font-weight: 400">${hasLog ? 'Already logged: the last weight used is proposed instead.' : 'Proposed the first time you do it, until it has been logged.'}</span>
+    </label>
+    <label class="field">Machine setup
+      <input class="input" placeholder="e.g. seat 4, pad XL" value=${setup} onInput=${(e) => setSetup(e.target.value)} onBlur=${() => { if (setup !== (ex.setup || '')) save({ setup }); }} onKeyDown=${blurOnEnter} />
+    </label>
+    ${inPlans.length
+      ? html`<p class="tiny muted">In ${inPlans.map((n) => 'Workout ' + n).join(' and ')}. To archive it, remove it from the plan first.</p>`
+      : html`<button class="btn btn-warn" style="align-self: flex-start" onClick=${() => { save({ archived: true }); toast(ex.name + ' archived. Its history is kept.'); }}>Archive</button>`}
+  </div>`;
+}
+
+function Exercises() {
+  const d = useStore();
+  const [openId, setOpenId] = useState(null);
+  const [newName, setNewName] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const plans = activePlans(d.plans);
+  const inPlans = (id) => plans.filter((p) => p.items.some((it) => it.exerciseId === id)).map((p) => p.name);
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const active = d.exercises.filter((e) => !e.archived).sort(byName);
+  const archived = d.exercises.filter((e) => e.archived).sort(byName);
+  const create = () => {
+    const n = newName.trim();
+    if (!n) return;
+    if (d.exercises.some((e) => e.name.trim().toLowerCase() === n.toLowerCase())) { toast(n + ' is already in the catalog.'); return; }
+    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, startWeight: null };
+    saveExercise(ex);
+    setNewName('');
+    setOpenId(ex.id);
+  };
+  return html`<div class="screen">
+    <div class="header" style="gap: 6px">
+      <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: 'settings' })}><${Icon} name="back" size=${20} sw=${2.2} />Settings</button>
+      <h1 class="title">Exercises</h1>
+      <span class="small muted">${active.length} in the catalog. Exercises not in a plan can be added to one, swapped in or added to a workout.</span>
+    </div>
+    <div class="main">
+      <div style="display: flex; gap: 8px; align-items: flex-end">
+        <label class="field" style="flex: 1">New exercise
+          <input class="input" placeholder="Name" value=${newName} onInput=${(e) => setNewName(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') create(); }} />
+        </label>
+        <button class="btn btn-primary" onClick=${create}>Add</button>
+      </div>
+      <${ImportButton} label="Add exercises from file" cls="btn" onFile=${addExercisesFromFile} />
+      ${active.map((ex) => {
+        const open = openId === ex.id;
+        const ps = inPlans(ex.id);
+        const h = exerciseHistory(d.sessions, ex.id);
+        const last = h.length ? h[h.length - 1] : null;
+        const planW = plans.flatMap((p) => p.items).find((it) => it.exerciseId === ex.id && it.weight !== null && it.weight !== undefined);
+        const wTxt = last ? (last.top === 0 ? 'bodyweight' : 'last ' + fmtNum(last.top) + ' kg')
+          : planW ? 'plan ' + fmtWeight(planW.weight)
+          : ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtWeight(ex.startWeight) : 'no weight yet';
+        return html`<div key=${ex.id} class=${'card' + (open ? ' ex-card open' : '')}>
+          <button class="ex-head" style="min-height: 60px" aria-expanded=${open} onClick=${() => setOpenId(open ? null : ex.id)}>
+            <div class="ex-head-text">
+              <span class="ex-name">${ex.name}</span>
+              <span class="small muted">${ex.equipment === 'dumbbell' ? 'Dumbbells' : 'Machine / barbell'} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
+            </div>
+          </button>
+          ${open ? html`<${ExerciseEditor} key=${ex.id} ex=${ex} inPlans=${ps} hasLog=${!!last} />` : null}
+        </div>`;
+      })}
+      ${archived.length ? html`<button class="btn btn-ghost" onClick=${() => setShowArchived(!showArchived)}>${showArchived ? 'Hide' : 'Show'} archived (${archived.length})</button>` : null}
+      ${showArchived ? archived.map((ex) => html`<div key=${ex.id} class="card row">
+        <span class="muted">${ex.name}</span>
+        <button class="btn" onClick=${() => { saveExercise({ ...ex, archived: false }); toast(ex.name + ' restored.'); }}>Restore</button>
+      </div>`) : null}
+    </div>
+    <${Nav} active="settings" />
+  </div>`;
+}
+
 function NumberSetting({ label, value, onSave, width = 56 }) {
   const [text, setText] = useState(fmtNum(value));
   useEffect(() => setText(fmtNum(value)), [value]);
@@ -1423,6 +1548,13 @@ function Settings() {
         </div>`)}
       </div>
 
+      <span class="section-label">Catalog</span>
+      <button class="card row" style="text-align: left; width: 100%" onClick=${() => go({ name: 'exercises' })}>
+        <span style="display: flex; flex-direction: column; gap: 2px"><span>Exercises</span>
+          <span class="tiny muted">${d.exercises.filter((e) => !e.archived).length} in the catalog · add, rename, archive</span></span>
+        <span class="muted"><${Icon} name="next" size=${20} /></span>
+      </button>
+
       <span class="section-label">Data</span>
       <div class="card card-pad" style="gap: 10px">
         <p class="small" style="line-height: 1.45; color: var(--text-2)">Plans and logs are stored on this iPhone only. Export a backup now and then, for example to iCloud Drive.</p>
@@ -1463,6 +1595,7 @@ function App() {
     else if (r.name === 'progress') screen = html`<${Progress} />`;
     else if (r.name === 'session') screen = html`<${SessionDetail} key=${r.id} id=${r.id} from=${r.from} />`;
     else if (r.name === 'settings') screen = html`<${Settings} />`;
+    else if (r.name === 'exercises') screen = html`<${Exercises} />`;
     else screen = html`<${Home} />`;
   }
   return html`${screen}${d.toast ? html`<div class="toast" role="status">${d.toast}</div>` : null}`;
