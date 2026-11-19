@@ -26,7 +26,8 @@ The phone picks up the new version the next time the app is opened with a connec
 No build step. Serve the folder with any static server, e.g. `python3 -m http.server`.
 Logic tests: `node --test tests/logic.test.mjs`.
 
-Uses [Preact](https://preactjs.com) and [htm](https://github.com/developit/htm) (MIT), vendored in `js/vendor/`.
+Uses [Preact](https://preactjs.com) (MIT) and [htm](https://github.com/developit/htm) (Apache 2.0), vendored in `js/vendor/`
+together with their license files.
 
 ## Beta
 
@@ -35,3 +36,11 @@ Uses [Preact](https://preactjs.com) and [htm](https://github.com/developit/htm) 
 Changes go straight to the regular app. The beta is only used if a release breaks the regular app:
 then the root is reverted to the previous version and the work continues in `beta/` until it is fixed.
 The root `sw.js` deletes only its own caches (`lift-happens-v…`); the beta's `sw.js` only `lift-happens-beta-…`.
+
+## License
+
+Lift Happens © 2026 Davide — licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
+
+You may use, copy, modify and share it. Any modified version you distribute or offer to others,
+including over a network, must stay under the same license and come with its full source code.
+The bundled libraries keep their own licenses (see `js/vendor/`).
