@@ -9,7 +9,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -422,12 +422,12 @@ function Home() {
         ? html`<p class="quote">${QUOTES[d.settings.dailyQuote.index]}</p>` : null}
     </div>
     <div class="main" style="gap: 16px; padding-top: 16px">
-      ${open ? html`<section class="card card-pad" style="gap: 12px; border-color: var(--accent)">
-        <span class="section-label" style="margin: 0">In progress</span>
+      ${open ? html`<section class="card card-pad card-live" style="gap: 12px">
+        <span class="section-label live-label" style="margin: 0"><span class="live-dot" aria-hidden="true"></span>In progress</span>
         <h2 style="font-size: 28px; font-weight: 700">${planName(d.plans.find((p) => p.id === open.planId))}</h2>
         <p class="small muted">Started ${fmtDate(open.startedAt, true)} · ${open.entries.filter((e) => e.status !== 'open').length} of ${open.entries.length} exercises handled</p>
-        <button class="btn btn-primary btn-big" onClick=${() => go({ name: 'workout', id: open.id })}>Resume workout</button>
-        <button class="btn btn-ghost" onClick=${discard}>Discard this workout</button>
+        <button class="btn btn-go btn-big" onClick=${() => go({ name: 'workout', id: open.id })}>Resume workout</button>
+        <button class="btn btn-ghost btn-danger-text" onClick=${discard}>Discard this workout</button>
       </section>` : html`<section class="card card-pad" style="padding: 20px; gap: 14px">
         <span class="section-label" style="margin: 0">Today</span>
         <div>
