@@ -9,7 +9,7 @@ import {
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.5.2';
+const VERSION = '1.5.3';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -1584,7 +1584,7 @@ function App() {
       <pre>${d.loadError}</pre>
     </div>`;
   }
-  if (!d.loaded) return html`<div class="boot">Lift Happens</div>`;
+  if (!d.loaded) return html`<div class="boot"><img src="icons/face.png" width="120" alt="" /><span>Lift Happens</span></div>`;
   let screen;
   if (!d.plans.length) screen = html`<${Welcome} />`;
   else {

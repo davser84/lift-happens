@@ -1,9 +1,11 @@
 // Lift Happens service worker.
-// Network first (always checks for the newest files when online), cache as fallback (offline at the gym).
+// The app starts straight from the files saved on the phone (fast, also offline).
+// Updates: the browser checks sw.js on every launch; a new VERSION downloads ALL files
+// into a fresh cache in one go (never mixed), then the open page reloads once (see index.html).
 // Bump VERSION whenever any app file changes.
 // Cache names of the regular app all start with 'lift-happens-v' (the beta uses 'lift-happens-beta-').
 const PREFIX = 'lift-happens-v';
-const VERSION = PREFIX + '1.5.2';
+const VERSION = PREFIX + '1.5.3';
 const FILES = [
   './',
   './index.html',
@@ -20,8 +22,6 @@ const FILES = [
   './icons/face.png',
   './icons/face-wink.png'
 ];
-const NETWORK_TIMEOUT_MS = 4000;
-
 self.addEventListener('install', (event) => {
   // cache: 'reload' skips the browser's HTTP cache, so old and new files never get mixed.
   event.waitUntil(
@@ -46,10 +46,6 @@ function cacheKey(url) {
   return u.origin + u.pathname;
 }
 
-function timeout(ms) {
-  return new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms));
-}
-
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
@@ -58,17 +54,17 @@ self.addEventListener('fetch', (event) => {
 
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
+    let hit = await cache.match(cacheKey(req.url));
+    if (!hit && req.mode === 'navigate') {
+      hit = (await cache.match(cacheKey(new URL('./', self.location).href)))
+        || (await cache.match(cacheKey(new URL('./index.html', self.location).href)));
+    }
+    if (hit) return hit;
     try {
-      const res = await Promise.race([fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }), timeout(NETWORK_TIMEOUT_MS)]);
+      const res = await fetch(req);
       if (res && res.ok) cache.put(cacheKey(req.url), res.clone());
       return res;
     } catch (err) {
-      const hit = await cache.match(cacheKey(req.url));
-      if (hit) return hit;
-      if (req.mode === 'navigate') {
-        const shell = await cache.match(cacheKey(new URL('./index.html', self.location).href));
-        if (shell) return shell;
-      }
       return Response.error();
     }
   })());
