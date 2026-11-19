@@ -14,6 +14,30 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="styles.css">
+<script>
+// Screen height: iOS (26) can report a wrong viewport height when a Home Screen web app opens,
+// which pushed the bottom bar up until the first touch. Installed in portrait, the app fills the
+// whole screen, so use the real screen height there; elsewhere use the window height.
+(function () {
+  var root = document.documentElement;
+  var standalone = window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  function fit() {
+    var portrait = window.innerHeight >= window.innerWidth;
+    var h = standalone && portrait && window.screen && screen.height ? screen.height : window.innerHeight;
+    if (h > 0) root.style.setProperty('--app-h', h + 'px');
+    if (window.scrollY) window.scrollTo(0, 0);
+  }
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  fit();
+  window.addEventListener('resize', fit);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', fit);
+  window.addEventListener('orientationchange', function () { setTimeout(fit, 300); });
+  window.addEventListener('pageshow', fit);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { fit(); setTimeout(fit, 300); } });
+  [100, 400, 1000, 2500].forEach(function (t) { setTimeout(fit, t); });
+})();
+</script>
 </head>
 <body>
 <div id="app"><div class="boot"><img src="icons/face.png" width="120" alt=""><span>Lift Happens</span></div></div>

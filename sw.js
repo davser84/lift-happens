@@ -5,7 +5,7 @@
 // Bump VERSION whenever any app file changes.
 // Cache names of the regular app all start with 'lift-happens-v' (the beta uses 'lift-happens-beta-').
 const PREFIX = 'lift-happens-v';
-const VERSION = PREFIX + '1.5.3';
+const VERSION = PREFIX + '1.5.4';
 const FILES = [
   './',
   './index.html',
