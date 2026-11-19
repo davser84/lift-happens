@@ -1,11 +1,11 @@
 // Lift Happens service worker.
 // The app starts straight from the files saved on the phone (fast, also offline).
 // Updates: the browser checks sw.js on every launch; a new VERSION downloads ALL files
-// into a fresh cache in one go (never mixed), then the open page reloads once (see index.html).
+// into a fresh cache in one go, each with ?v=VERSION so none can be a stale copy (never mixed), then the open page reloads once (see index.html).
 // Bump VERSION whenever any app file changes.
 // Cache names of the regular app all start with 'lift-happens-v' (the beta uses 'lift-happens-beta-').
 const PREFIX = 'lift-happens-v';
-const VERSION = PREFIX + '1.5.6';
+const VERSION = PREFIX + '1.5.7';
 const FILES = [
   './',
   './index.html',
@@ -23,10 +23,27 @@ const FILES = [
   './icons/face-wink.png'
 ];
 self.addEventListener('install', (event) => {
-  // cache: 'reload' skips the browser's HTTP cache, so old and new files never get mixed.
-  event.waitUntil(
-    caches.open(VERSION).then((cache) => cache.addAll(FILES.map((f) => new Request(f, { cache: 'reload' }))))
-  );
+  // Every file is downloaded as e.g. "js/app.js?v=lift-happens-v1.5.7". GitHub's network has never
+  // seen that address, so it must return the freshly published file, never a copy left over from
+  // before the publish (that is how 1.5.6 could end up mixed with 1.5.5 files). cache: 'reload'
+  // also skips the phone's own HTTP cache. Files are stored under their plain address.
+  // If any download fails, the update is discarded and retried on the next launch.
+  event.waitUntil((async () => {
+    const cache = await caches.open(VERSION);
+    try {
+      await Promise.all(FILES.map(async (f) => {
+        const url = new URL(f, self.location);
+        const fresh = new URL(url.href);
+        fresh.searchParams.set('v', VERSION);
+        const res = await fetch(new Request(fresh.href, { cache: 'reload' }));
+        if (!res.ok) throw new Error('Download failed: ' + f + ' (' + res.status + ')');
+        await cache.put(cacheKey(url.href), res);
+      }));
+    } catch (err) {
+      await caches.delete(VERSION);
+      throw err;
+    }
+  })());
   self.skipWaiting();
 });
 
