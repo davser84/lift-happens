@@ -5,7 +5,7 @@
 // Bump VERSION whenever any app file changes.
 // Cache names of the regular app all start with 'lift-happens-v' (the beta uses 'lift-happens-beta-').
 const PREFIX = 'lift-happens-v';
-const VERSION = PREFIX + '1.6.0';
+const VERSION = PREFIX + '1.7.0';
 const FILES = [
   './',
   './index.html',
@@ -15,12 +15,33 @@ const FILES = [
   './js/db.js',
   './js/logic.js',
   './js/quotes.js',
+  './js/exercise-icons.js',
   './js/vendor/preact-htm.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/face.png',
-  './icons/face-wink.png'
+  './icons/face-wink.png',
+  './icons/exercises/back-extension.png',
+  './icons/exercises/cable-triceps-pushdown.png',
+  './icons/exercises/chest-press.png',
+  './icons/exercises/deadlift.png',
+  './icons/exercises/decline-bench-press.png',
+  './icons/exercises/decline-crunches.png',
+  './icons/exercises/dips.png',
+  './icons/exercises/dumbbell-biceps-curl.png',
+  './icons/exercises/face-pull.png',
+  './icons/exercises/lateral-raises.png',
+  './icons/exercises/leg-curl.png',
+  './icons/exercises/leg-press.png',
+  './icons/exercises/lying-dumbbell-triceps-extension.png',
+  './icons/exercises/machine-biceps-curl.png',
+  './icons/exercises/pull-ups.png',
+  './icons/exercises/rear-delt-fly.png',
+  './icons/exercises/seated-cable-row.png',
+  './icons/exercises/shoulder-press.png',
+  './icons/exercises/squat.png',
+  './icons/exercises/total-abdominal.png'
 ];
 self.addEventListener('install', (event) => {
   // Every file is downloaded as e.g. "js/app.js?v=lift-happens-v1.5.7". GitHub's network has never

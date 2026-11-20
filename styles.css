@@ -224,3 +224,9 @@ h1, h2, h3, p { margin: 0; }
 /* the exercise being done: same green as the workout in progress */
 .ex-card.live { border-color: rgba(52,199,123,0.55); box-shadow: 0 0 0 1px rgba(52,199,123,0.18), 0 10px 28px rgba(20,120,70,0.16); }
 .ex-name .live-dot { flex-shrink: 0; margin-right: 2px; }
+/* Exercise icons: right side of a row, level with the exercise name */
+.ex-head-side { display: flex; align-items: center; gap: 8px; align-self: flex-start; flex-shrink: 0; }
+.ex-icon { position: relative; flex-shrink: 0; align-self: flex-start; display: block; }
+.ex-icon img { display: block; width: 100%; height: 100%; }
+.ex-icon.faded img { opacity: 0.35; filter: saturate(0.4); }
+.ex-icon-check { position: absolute; right: -4px; bottom: -3px; width: 18px; height: 18px; border-radius: 9px; background: var(--accent-gradient); color: #0F1115; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #16213A; }

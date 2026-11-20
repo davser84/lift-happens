@@ -24,7 +24,14 @@ The phone picks up the new version the next time the app is opened with a connec
 ## Develop
 
 No build step. Serve the folder with any static server, e.g. `python3 -m http.server`.
-Logic tests: `node --test tests/logic.test.mjs`.
+Tests: `node --test tests/*.mjs`.
+
+## Exercise icons
+
+Part of the app, like its logo (not in backups). Pictures: `icons/exercises/<key>.png` (120 × 120 px, transparent).
+`js/exercise-icons.js` lists the icon keys and which icon each exercise shows, by the exercise's internal id
+(so renaming keeps the icon). Only exercise ids and icon keys go there, never plans, sets, reps or weights.
+To add one: add the PNG, its key in `ICONS`, the file in `FILES` in `sw.js`, and the exercise id in `ICON_BY_EXERCISE`.
 
 Uses [Preact](https://preactjs.com) (MIT) and [htm](https://github.com/developit/htm) (Apache 2.0), vendored in `js/vendor/`
 together with their license files.

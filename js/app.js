@@ -8,8 +8,9 @@ import {
   pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange
 } from './logic.js';
 import { QUOTES } from './quotes.js';
+import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -172,6 +173,17 @@ const P = {
   next: 'M9 6l6 6-6 6',
   trash: 'M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3'
 };
+
+// Exercise icon on the right of a row (nothing if the exercise has none).
+// Done: a small check on its corner; skipped: faded.
+function ExIcon({ id, done = false, skipped = false, size = 40 }) {
+  const src = exerciseIconSrc(id);
+  if (!src) return null;
+  return html`<span class=${'ex-icon' + (skipped ? ' faded' : '')} style=${'width:' + size + 'px;height:' + size + 'px'}>
+    <img src=${src} alt="" width=${size} height=${size} draggable="false" />
+    ${done ? html`<span class="ex-icon-check"><${Icon} name="check" size=${11} sw=${3.4} /></span>` : null}
+  </span>`;
+}
 
 function Icon({ name, size = 20, sw = 2 }) {
   return html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width=${sw} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -790,8 +802,12 @@ function Workout({ id }) {
             ${inChips.length ? html`<span class="rem-chips">${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}</span>` : null}
             ${outRem ? html`<span class="rem-out">Next time: ${remText(outRem)}</span>` : null}
           </div>
+          ${exerciseIconSrc(e.exerciseId) ? html`<span class="ex-head-side">
+              ${isSkipped ? html`<span class="skip-badge">Skipped</span>` : null}
+              <${ExIcon} id=${e.exerciseId} done=${isDone} skipped=${isSkipped} />
+            </span>` : html`
           ${isDone ? html`<span class="check-badge"><${Icon} name="check" size=${16} sw=${3} /></span>` : null}
-          ${isSkipped ? html`<span class="skip-badge">Skipped</span>` : null}
+          ${isSkipped ? html`<span class="skip-badge">Skipped</span>` : null}`}
         </button>
         ${open ? html`<div class="ex-body">
           ${isSkipped ? html`<div class="skip-box">
@@ -1149,10 +1165,12 @@ function Plans() {
         const wTxt = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? '—' : fmtWeight(wNum);
         return html`<div key=${it.id} class=${'card' + (open ? ' ex-card open' : '')}>
           <button class="ex-head" style="min-height: 56px" aria-expanded=${open} onClick=${() => setOpenItem(open ? null : it.id)}>
-            <span class="small muted num" style="width: 18px">${i + 1}</span>
-            <span style="flex: 1; min-width: 0; font-size: 15px; font-weight: 500">${ex.name}</span>
-            <span class="small muted num">${(it.sets || '?') + ' × ' + (it.reps || '?')}</span>
-            <span class="small num" style="width: 70px; text-align: right; color: var(--text-2)">${wTxt}</span>
+            <span class="small muted num" style="width: 18px; align-self: flex-start; padding-top: 2px">${i + 1}</span>
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
+              <span style="font-size: 16px; font-weight: 600; line-height: 1.25">${ex.name}</span>
+              <span class="small num" style="color: var(--text-2)">${(it.sets || '?') + ' × ' + (it.reps || '?') + (wTxt === '—' ? '' : ' · ' + wTxt)}</span>
+            </span>
+            <${ExIcon} id=${ex.id} />
           </button>
           ${open ? html`<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line)">
             <label class="field">Exercise name (renames it everywhere)
@@ -1296,6 +1314,7 @@ function SessionDetail({ id, from }) {
               <span class="small num" style="color: var(--text-2)">${setsText(e.sets)}</span>
               ${tags.length ? html`<span class="tags">${tags.map(([t, k]) => html`<span key=${t} class=${'tag ' + k}>${t}</span>`)}</span>` : null}
             </div>
+            <${ExIcon} id=${e.exerciseId} />
           </div>`;
         })}
       </div>` : html`<p class="small muted" style="margin: 0 4px">No exercises were confirmed.</p>`}
@@ -1432,7 +1451,8 @@ function ExerciseProgress() {
       <h1 class="title">Progress</h1>
       <${ProgressTabs} active="exercises" />
       <button class="card" style="min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 14px; text-align: left" onClick=${() => setPicker(true)} aria-haspopup="dialog">
-        <span style="display: flex; flex-direction: column; gap: 2px"><span class="col-label" style="text-align: left">EXERCISE</span><span style="font-weight: 600">${ex ? ex.name : '—'}</span></span>
+        <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><span class="col-label" style="text-align: left">EXERCISE</span><span style="font-weight: 600">${ex ? ex.name : '—'}</span></span>
+        ${ex ? html`<${ExIcon} id=${ex.id} size=${48} />` : null}
         <span class="muted"><${Icon} name="chevron" /></span>
       </button>
     </div>
