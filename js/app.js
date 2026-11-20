@@ -5,12 +5,13 @@ import {
   createSession, startingSets, setsFromHistory, hasEmptyWeight, activePlans, nextPlanAfter,
   plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
   validateImport, buildExport, pickDailyQuote, localDayKey,
-  pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange
+  pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange,
+  suggestIncrease, backupDue, daysSinceBackup, weeksInARow, computeMilestones, liftedComparison, sessionVolume
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.7.1';
+const VERSION = '1.8.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -23,7 +24,7 @@ let state = {
   sessions: [],
   settings: { ...DEFAULT_SETTINGS },
   route: { name: 'home' },
-  progressTab: 'workouts',
+  progressTab: 'overview',
   loadError: null,
   toast: null
 };
@@ -47,10 +48,11 @@ function useStore() {
 }
 
 let toastTimer = null;
-function toast(msg) {
+// A short message at the bottom; with an action (e.g. Undo) it stays a little longer.
+function toast(msg, action = null) {
   clearTimeout(toastTimer);
-  setState({ toast: msg });
-  toastTimer = setTimeout(() => setState({ toast: null }), 2800);
+  setState({ toast: { msg, action } });
+  toastTimer = setTimeout(() => setState({ toast: null }), action ? 6000 : 2800);
 }
 
 function go(route) {
@@ -146,6 +148,7 @@ function doneInOrder(session) {
 
 function ProgressTabs({ active }) {
   return html`<div class="seg" role="tablist" aria-label="Progress view">
+    <button role="tab" aria-selected=${active === 'overview'} class=${active === 'overview' ? 'on' : ''} onClick=${() => setState({ progressTab: 'overview' })}>Overview</button>
     <button role="tab" aria-selected=${active === 'workouts'} class=${active === 'workouts' ? 'on' : ''} onClick=${() => setState({ progressTab: 'workouts' })}>Workouts</button>
     <button role="tab" aria-selected=${active === 'exercises'} class=${active === 'exercises' ? 'on' : ''} onClick=${() => setState({ progressTab: 'exercises' })}>Exercises</button>
   </div>`;
@@ -171,7 +174,8 @@ const P = {
   bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   next: 'M9 6l6 6-6 6',
-  trash: 'M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3'
+  trash: 'M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3',
+  download: 'M12 4v11M7 10l5 5 5-5M5 20h14'
 };
 
 // Exercise icon on the right of a row (nothing if the exercise has none).
@@ -326,7 +330,8 @@ function ImportButton({ label, cls, onFile }) {
 
 async function exportBackup() {
   const now = new Date();
-  const name = 'lift-happens-backup-' + now.toISOString().slice(0, 10) + '.json';
+  // Always the same name: saved into the same folder, it replaces the previous backup (the date is inside).
+  const name = 'lift-happens-backup.json';
   const text = JSON.stringify(buildExport(state, now), null, 2);
   const file = new File([text], name, { type: 'application/json' });
   try {
@@ -342,7 +347,7 @@ async function exportBackup() {
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
     }
-    saveSettings({ lastBackup: now.toISOString() });
+    saveSettings({ lastBackup: now.toISOString(), backupSnoozeUntil: null });
     toast('Backup ready: ' + name);
   } catch (err) {
     if (err && err.name === 'AbortError') return;
@@ -424,6 +429,9 @@ function Home() {
 
   const names = plan ? plan.items.map((it) => (exById[it.exerciseId] || {}).name).filter(Boolean) : [];
   const preview = names.slice(0, 4).join(' · ') + (names.length > 4 ? ' + ' + (names.length - 4) + ' more' : '');
+  const showBackup = backupDue(d.settings, d.sessions);
+  const backupDays = showBackup ? daysSinceBackup(d.settings, d.sessions) : null;
+  const notNow = () => saveSettings({ backupSnoozeUntil: new Date(Date.now() + 7 * 86400000).toISOString() });
 
   return html`<div class="screen">
     <div class="header">
@@ -438,6 +446,19 @@ function Home() {
         ? html`<p class="quote">${QUOTES[d.settings.dailyQuote.index]}</p>` : null}
     </div>
     <div class="main" style="gap: 16px; padding-top: 16px">
+      ${showBackup ? html`<section class="card card-pad backup-card" aria-label="Backup reminder">
+        <div style="display: flex; gap: 12px; align-items: flex-start">
+          <span class="backup-icon"><${Icon} name="download" size=${20} /></span>
+          <div style="display: flex; flex-direction: column; gap: 3px">
+            <strong style="font-size: 16px">${d.settings.lastBackup ? 'Last backup: ' + backupDays + ' days ago' : 'No backup yet'}</strong>
+            <span class="small" style="line-height: 1.4; color: var(--text-2)">Plans and workouts live only on this iPhone. Save a copy, e.g. to iCloud Drive.</span>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top: 6px">
+          <button class="btn btn-primary" onClick=${exportBackup}>Export now</button>
+          <button class="btn" onClick=${notNow}>Not now</button>
+        </div>
+      </section>` : null}
       ${open ? html`<section class="card card-pad card-live" style="gap: 12px">
         <span class="section-label live-label" style="margin: 0"><span class="live-dot" aria-hidden="true"></span>In progress</span>
         <h2 style="font-size: 28px; font-weight: 700">${planName(d.plans.find((p) => p.id === open.planId))}</h2>
@@ -496,6 +517,7 @@ function Workout({ id }) {
   const [setupOpen, setSetupOpen] = useState({});
   const [confirmFinish, setConfirmFinish] = useState(false);
   const [remPanel, setRemPanel] = useState(null);
+  const [sugSheet, setSugSheet] = useState(null);
   const [noteOpen, setNoteOpen] = useState({});
   const [menu, setMenu] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -782,6 +804,8 @@ function Workout({ id }) {
       if (inRem.scheme && e.appliedScheme !== schemeLabel(inRem.scheme) && !already) inChips.push(schemeLabel(inRem.scheme));
       if (inRem.note && inRem.note.trim()) inChips.push('Note');
     }
+    // Automatic suggestion (green): your own weight or scheme reminder always wins.
+    const suggest = !editing && !(inRem && (inRem.dir || inRem.scheme)) && suggestIncrease(d.sessions, e, item, ex, id);
     const open = openId === e.id;
     const isDone = e.status === 'done';
     const isSkipped = e.status === 'skipped';
@@ -808,7 +832,10 @@ function Workout({ id }) {
             <span class="ex-name">${open && e.status === 'open' && !editing ? html`<span class="live-dot" aria-label="In progress"></span>` : null}${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
             <span class="small muted num">${e.sets.length} × ${rTxt} · ${wTxt}</span>
             ${tags.length ? html`<span class="ex-tag">${tags.join(' · ')}</span>` : null}
-            ${inChips.length ? html`<span class="rem-chips">${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}</span>` : null}
+            ${inChips.length || (suggest && !open) ? html`<span class="rem-chips">
+              ${suggest && !open ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />suggested</span>` : null}
+              ${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}
+            </span>` : null}
             ${outRem ? html`<span class="rem-out">Next time: ${remText(outRem)}</span>` : null}
           </div>
           ${exerciseIconSrc(e.exerciseId) ? html`<span class="ex-head-side">
@@ -823,6 +850,8 @@ function Workout({ id }) {
             <p style="flex: 1">Logged as skipped. It stays in the plan with the same weights next time.</p>
             <button class="btn" onClick=${() => skip(e)}>Undo</button>
           </div>` : html`
+          ${suggest ? html`<div class="sug-row"><button class="rem-chip sug sug-btn" aria-label=${'Suggested: more weight for ' + ex.name + '. Options'} onClick=${() => setSugSheet(e.exerciseId)}>
+            <${Icon} name="up" size=${12} sw=${2.6} />suggested</button></div>` : null}
           ${inRem ? html`<div class="rem-box">
             <span class="rem-label">Reminder from ${fmtDate(incoming.session.startedAt)}</span>
             ${inRem.dir === 'up' ? html`<strong>↑ Increase the weight</strong>` : null}
@@ -976,6 +1005,21 @@ function Workout({ id }) {
       </div>
     </div>` : null}
 
+    ${sugSheet ? (() => {
+      const ex = exById[sugSheet] || { id: sugSheet, name: 'this exercise' };
+      const off = () => {
+        setSugSheet(null);
+        const cur = state.exercises.find((x) => x.id === ex.id);
+        if (!cur) return;
+        saveExercise({ ...cur, noSuggest: true });
+        toast('No more suggestions for ' + cur.name + '.', { label: 'Undo', run: () => saveExercise({ ...cur, noSuggest: false }) });
+      };
+      return html`<${Sheet} title=${'Suggested: more weight'} sub=${ex.name} onClose=${() => setSugSheet(null)}>
+        <button class="sheet-item btn-danger-text" style="justify-content: center" onClick=${off}>Don’t suggest for ${ex.name}</button>
+        <p class="small muted" style="padding: 10px 10px 0; line-height: 1.45">You can turn it back on in Plans or in Settings → Exercises.</p>
+      </${Sheet}>`;
+    })() : null}
+
     ${planAsk ? html`<div class="overlay center">
       <div class="dialog" role="alertdialog" aria-labelledby="plan-ask-title">
         <h2 id="plan-ask-title">Update ${planAsk.planLabel}?</h2>
@@ -1061,6 +1105,7 @@ function Summary({ id, edited }) {
   const next = d.plans.find((p) => p.id === d.settings.nextPlanId);
   const sum = sessionSummary(session, d.sessions, exMap(), plan);
   const reopen = () => go({ name: 'workout', id });
+  const reached = edited ? [] : computeMilestones(d.sessions).unlocked.filter((u) => u.sessionId === id);
 
   return html`<div class="screen">
     <div class="main" style="padding: calc(var(--safe-top) + var(--top-gap)) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
@@ -1073,6 +1118,15 @@ function Summary({ id, edited }) {
           <span class="small muted">Saved automatically. You can close the app.</span>
         </div>
       </div>
+
+      ${reached.map((u) => html`<section key=${u.kind + u.at} class="ms-banner">
+        <span class="ms-trophy big"><${Icon} name="trophy" size=${26} /></span>
+        <span style="display: flex; flex-direction: column; gap: 3px">
+          <span class="ms-banner-label">Milestone unlocked</span>
+          <strong style="font-size: 20px; font-family: var(--font-rounded)">${u.name} · ${u.title}</strong>
+          <span class="small" style="line-height: 1.4; color: var(--text-2)">${u.line}</span>
+        </span>
+      </section>`)}
 
       <${SummaryCards} sum=${sum} plan=${plan} live=${true} />
 
@@ -1202,6 +1256,7 @@ function Plans() {
             <label class="field">Machine setup (shown with an extra tap)
               <input class="input" placeholder="e.g. seat 4, pad XL" value=${ex.setup || ''} onInput=${(e) => editEx(ex.id, { setup: e.target.value })} />
             </label>
+            <${SuggestSwitch} ex=${ex} onChange=${(on) => editEx(ex.id, { noSuggest: !on })} />
             <div class="btn-row">
               <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' up'} onClick=${() => move(i, -1)}><${Icon} name="up" size=${18} sw=${2.2} /></button>
               <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' down'} onClick=${() => move(i, 1)}><${Icon} name="down" size=${18} sw=${2.2} /></button>
@@ -1227,7 +1282,154 @@ function Plans() {
 
 function Progress() {
   const d = useStore();
-  return d.progressTab === 'exercises' ? html`<${ExerciseProgress} />` : html`<${WorkoutHistory} />`;
+  if (d.progressTab === 'exercises') return html`<${ExerciseProgress} />`;
+  if (d.progressTab === 'workouts') return html`<${WorkoutHistory} />`;
+  return html`<${Overview} />`;
+}
+
+// ---------- Overview: calendar, volume per workout, milestones ----------
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// Plan colours (first plan blue, second orange; checked for colour-blind separation on the dark card).
+const PLAN_COLORS = ['#4A8AF0', '#C9780C'];
+const OTHER_COLOR = '#8494B3';
+const planColor = (plans, planId) => {
+  const i = activePlans(plans).findIndex((p) => p.id === planId);
+  return i >= 0 && i < PLAN_COLORS.length ? PLAN_COLORS[i] : OTHER_COLOR;
+};
+const kgText = (v) => Math.round(v).toLocaleString('en') + ' kg';
+const tText = (v) => fmtNum(Math.round(v / 100) / 10) + ' t';
+
+function MonthCalendar({ finished, plans }) {
+  const now = new Date();
+  const [ym, setYm] = useState({ y: now.getFullYear(), m: now.getMonth() });
+  const byDay = {};
+  for (const s of finished) byDay[localDayKey(new Date(s.startedAt))] = s;
+  const first = new Date(ym.y, ym.m, 1);
+  const lead = (first.getDay() + 6) % 7;
+  const daysIn = new Date(ym.y, ym.m + 1, 0).getDate();
+  const todayKey = localDayKey(now);
+  const oldest = new Date(finished[0].startedAt);
+  const canPrev = ym.y * 12 + ym.m > oldest.getFullYear() * 12 + oldest.getMonth();
+  const canNext = ym.y * 12 + ym.m < now.getFullYear() * 12 + now.getMonth();
+  const shift = (k) => { const d = new Date(ym.y, ym.m + k, 1); setYm({ y: d.getFullYear(), m: d.getMonth() }); };
+  const inMonth = finished.filter((s) => { const t = new Date(s.startedAt); return t.getFullYear() === ym.y && t.getMonth() === ym.m; }).length;
+  const last28 = finished.filter((s) => now - Date.parse(s.startedAt) < 28 * 86400000).length;
+  const streak = weeksInARow(finished, now);
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push(html`<span key=${'b' + i}></span>`);
+  for (let day = 1; day <= daysIn; day++) {
+    const key = localDayKey(new Date(ym.y, ym.m, day));
+    const s = byDay[key];
+    const plan = s ? plans.find((p) => p.id === s.planId) : null;
+    if (s) cells.push(html`<button key=${key} class="cal-day cal-done" style=${'background:' + planColor(plans, s.planId)}
+      aria-label=${day + ' ' + MONTH_NAMES[ym.m] + ', ' + planName(plan) + '. Open its log'} onClick=${() => go({ name: 'session', id: s.id, from: 'progress' })}>${day}</button>`);
+    else cells.push(html`<span key=${key} class=${'cal-day' + (key === todayKey ? ' cal-today' : '') + (key > todayKey ? ' cal-future' : '')}>${day}</span>`);
+  }
+  return html`<section class="card card-pad" style="gap: 10px">
+    <div style="display: flex; align-items: center; justify-content: space-between">
+      <button class="icon-btn" aria-label="Previous month" disabled=${!canPrev} onClick=${() => shift(-1)}><${Icon} name="back" size=${20} /></button>
+      <span style="font-size: 18px; font-weight: 700; font-family: var(--font-rounded)">${MONTH_NAMES[ym.m]} ${ym.y}</span>
+      <button class="icon-btn" aria-label="Next month" disabled=${!canNext} onClick=${() => shift(1)}><${Icon} name="next" size=${20} /></button>
+    </div>
+    <div class="cal-grid">
+      ${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((w, i) => html`<span key=${'w' + i} class="cal-head">${w}</span>`)}
+      ${cells}
+    </div>
+    <div class="legend">${activePlans(plans).slice(0, 2).map((p) => html`<span key=${p.id}><span class="legend-dot" style=${'background:' + planColor(plans, p.id)}></span>${planName(p)}</span>`)}</div>
+    <p class="small" style="line-height: 1.45"><strong>${inMonth} ${inMonth === 1 ? 'workout' : 'workouts'}</strong>${' in ' + MONTH_NAMES[ym.m] + ' · '}<strong>${fmtNum(Math.round(last28 / 4 * 10) / 10)}</strong>${' a week (last 4 weeks)'}${streak ? html`${' · '}<strong>${streak} ${streak === 1 ? 'week' : 'weeks'}</strong>${' in a row with 2+'}` : null}</p>
+  </section>`;
+}
+
+function VolumeChart({ finished, plans }) {
+  const [pick, setPick] = useState(null);
+  const pts = finished.slice(-16).map((s, i) => ({ i, s, v: sessionVolume(s) }));
+  const series = activePlans(plans).slice(0, 2).map((p) => ({ plan: p, color: planColor(plans, p.id), pts: pts.filter((x) => x.s.planId === p.id) })).filter((x) => x.pts.length);
+  if (pts.length < 2 || !series.length) {
+    return html`<section class="card card-pad"><span style="font-size: 17px; font-weight: 700">Total volume per workout</span>
+      <span class="small muted">The chart appears after your second workout.</span></section>`;
+  }
+  const W = 340, H = 172, L = 40, R = 58, T = 12, B = 24;
+  const vals = pts.map((x) => x.v / 1000);
+  let lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  const stepT = [0.5, 1, 2, 5, 10, 20, 50].find((st) => (Math.ceil(hi / st) - Math.floor(lo / st)) <= 4) || 100;
+  lo = Math.floor(lo / stepT) * stepT; hi = Math.ceil(hi / stepT) * stepT; if (hi === lo) hi = lo + stepT;
+  const ticks = []; for (let t = lo; t <= hi + 1e-9; t += stepT) ticks.push(Math.round(t * 10) / 10);
+  const n = pts.length;
+  const X = (i) => L + 12 + (W - L - R - 12) * (n === 1 ? 0.5 : i / (n - 1));
+  const Y = (kg) => T + (H - T - B) * (1 - (kg / 1000 - lo) / (hi - lo));
+  const ends = series.map((se) => { const last = se.pts[se.pts.length - 1]; return { se, x: X(last.i), y: Y(last.v), v: last.v }; });
+  if (ends.length === 2 && Math.abs(ends[0].y - ends[1].y) < 16) {
+    const [a, b] = ends[0].y <= ends[1].y ? [ends[0], ends[1]] : [ends[1], ends[0]];
+    a.ly = a.y - 6; b.ly = b.y + 14;
+  }
+  const picked = pick !== null ? pts[pick] : null;
+  const pickedPlan = picked ? plans.find((p) => p.id === picked.s.planId) : null;
+  return html`<section class="card card-pad" style="gap: 8px">
+    <div style="display: flex; justify-content: space-between; align-items: baseline"><span style="font-size: 17px; font-weight: 700">Total volume per workout</span><span class="tiny muted">weight × reps</span></div>
+    <div class="legend">${series.map((se) => html`<span key=${se.plan.id}><span class="legend-line" style=${'background:' + se.color}></span>${planName(se.plan)}</span>`)}</div>
+    <p class="small" style="min-height: 20px; color: var(--text-2)">${picked
+      ? html`<strong>${fmtDate(picked.s.startedAt, true)}</strong> · ${planName(pickedPlan)} · ${kgText(picked.v)}`
+      : 'Tap a point for its date and total.'}</p>
+    <svg viewBox=${'0 0 ' + W + ' ' + H} width="100%" role="img" aria-label=${'Total volume of the last ' + n + ' workouts, ' + series.map((se) => planName(se.plan) + ' from ' + tText(se.pts[0].v) + ' to ' + tText(se.pts[se.pts.length - 1].v)).join(', ')}>
+      ${ticks.map((t) => html`<g key=${'t' + t}><line x1=${L} x2=${W - R + 6} y1=${Y(t * 1000)} y2=${Y(t * 1000)} stroke="rgba(140,175,255,0.12)" stroke-width="1" />
+        <text x=${L - 6} y=${Y(t * 1000) + 4} text-anchor="end" font-size="11" fill="var(--muted)">${fmtNum(t)} t</text></g>`)}
+      ${series.map((se) => html`<polyline key=${'l' + se.plan.id} points=${se.pts.map((x) => X(x.i) + ',' + Y(x.v)).join(' ')} fill="none" stroke=${se.color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />`)}
+      ${series.map((se) => se.pts.map((x) => html`<circle key=${'p' + x.i} cx=${X(x.i)} cy=${Y(x.v)} r=${pick === x.i ? 6 : 4.5} fill=${se.color} stroke="var(--card)" stroke-width="2" />`))}
+      ${ends.map((e) => html`<text key=${'e' + e.se.plan.id} x=${e.x + 9} y=${(e.ly ?? e.y + 4)} font-size="12" font-weight="700" fill="var(--text)">${e.se.plan.name} ${tText(e.v)}</text>`)}
+      <text x=${L} y=${H - 6} font-size="11" fill="var(--muted)">${fmtDate(pts[0].s.startedAt)}</text>
+      <text x=${W - R + 6} y=${H - 6} text-anchor="end" font-size="11" fill="var(--muted)">${fmtDate(pts[n - 1].s.startedAt)}</text>
+      ${pts.map((x) => html`<circle key=${'h' + x.i} cx=${X(x.i)} cy=${Y(x.v)} r="14" fill="transparent" style="cursor: pointer" onClick=${() => setPick(pick === x.i ? null : x.i)} />`)}
+    </svg>
+    <span class="tiny muted" style="line-height: 1.4">Each point is one workout${n < finished.length ? ' (last ' + n + ')' : ''}. ${series.length > 1 ? 'Compare A with A and B with B: they have different exercises.' : ''}</span>
+  </section>`;
+}
+
+function Milestones({ sessions }) {
+  const ms = computeMilestones(sessions);
+  const unlocked = ms.unlocked.slice().sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  const valueText = (n) => n.kind === 'lifted' ? tText(n.value) + ' / ' + tText(n.at) : Math.min(n.value, n.at) + ' / ' + n.at;
+  return html`
+    <section class="card card-pad" style="gap: 4px">
+      <span class="small muted">Lifted so far</span>
+      <span class="hero-num">${tText(ms.totals.lifted)}</span>
+      <span class="small" style="color: var(--text-2); line-height: 1.4">${liftedComparison(ms.totals.lifted, localDayKey())}</span>
+    </section>
+    <span class="section-label">Next milestones</span>
+    <section class="card" style="overflow: hidden">
+      ${ms.next.map((n, i) => html`<div key=${n.kind} class="ms-row" style=${i ? '' : 'border-top: 0'}>
+        <div style="display: flex; justify-content: space-between; gap: 8px"><span style="font-weight: 600">${n.name}</span><span class="small num" style="color: var(--text-2); white-space: nowrap">${valueText(n)}</span></div>
+        <span class="small muted">${n.title}</span>
+        <div class="ms-bar"><div style=${'width:' + Math.round(n.progress * 100) + '%'}></div></div>
+      </div>`)}
+    </section>
+    ${unlocked.length ? html`<span class="section-label">Unlocked · ${unlocked.length}</span>
+    <section class="card" style="overflow: hidden">
+      ${unlocked.map((u, i) => html`<div key=${u.kind + u.at} class="ms-done" style=${i ? '' : 'border-top: 0'}>
+        <span class="ms-trophy"><${Icon} name="trophy" size=${18} /></span>
+        <span style="flex: 1; display: flex; flex-direction: column; gap: 2px"><span style="font-weight: 600">${u.name}</span><span class="small muted">${u.title}</span></span>
+        <span class="small muted">${fmtDate(u.date)}</span>
+      </div>`)}
+    </section>` : null}`;
+}
+
+function Overview() {
+  const d = useStore();
+  const finished = d.sessions.filter((s) => s.finishedAt).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  return html`<div class="screen">
+    <div class="header">
+      <h1 class="title">Progress</h1>
+      <${ProgressTabs} active="overview" />
+    </div>
+    <div class="main" style="gap: 12px">
+      ${finished.length ? html`
+        <${MonthCalendar} finished=${finished} plans=${d.plans} />
+        <${VolumeChart} finished=${finished} plans=${d.plans} />
+        <${Milestones} sessions=${d.sessions} />`
+        : html`<${EmptyState}><p class="muted">Finish your first workout to see your calendar, volume and milestones here.</p></${EmptyState}>`}
+    </div>
+    <${Nav} active="progress" />
+  </div>`;
 }
 
 function WorkoutHistory() {
@@ -1301,7 +1503,7 @@ function SessionDetail({ id, from }) {
 
   return html`<div class="screen">
     <div class="header" style="gap: 6px">
-      <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: from === 'home' ? 'home' : 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />${from === 'home' ? 'Today' : 'Workouts'}</button>
+      <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: from === 'home' ? 'home' : 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />${from === 'home' ? 'Today' : d.progressTab === 'overview' ? 'Progress' : 'Workouts'}</button>
       <h1 class="title">${planName(plan)}</h1>
       <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}</span>
     </div>
@@ -1481,6 +1683,20 @@ function ExerciseProgress() {
 // Settings
 // ======================================================================
 
+// The per-exercise switch for automatic "more weight" suggestions (on unless switched off).
+function SuggestSwitch({ ex, onChange }) {
+  const on = !ex.noSuggest;
+  return html`<div class="row" style="padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 12px; gap: 12px">
+    <span style="display: flex; flex-direction: column; gap: 2px">
+      <span style="font-weight: 600">Suggest more weight</span>
+      <span class="tiny muted" style="line-height: 1.4">${on
+        ? 'A green ↑ appears after two times in a row with every planned rep done at the same weight.'
+        : 'Off: no automatic ↑ for ' + ex.name + ', in any workout. Your own reminders still work.'}</span>
+    </span>
+    <button class=${'switch' + (on ? ' on' : '')} role="switch" aria-checked=${on} aria-label="Suggest more weight" onClick=${() => onChange(!on)}><span></span></button>
+  </div>`;
+}
+
 function ExerciseEditor({ ex, inPlans, hasLog }) {
   const [name, setName] = useState(ex.name);
   const [setup, setSetup] = useState(ex.setup || '');
@@ -1517,6 +1733,7 @@ function ExerciseEditor({ ex, inPlans, hasLog }) {
     <label class="field">Machine setup
       <input class="input" placeholder="e.g. seat 4, pad XL" value=${setup} onInput=${(e) => setSetup(e.target.value)} onBlur=${() => { if (setup !== (ex.setup || '')) save({ setup }); }} onKeyDown=${blurOnEnter} />
     </label>
+    <${SuggestSwitch} ex=${ex} onChange=${(on) => save({ noSuggest: !on })} />
     ${inPlans.length
       ? html`<p class="tiny muted">In ${inPlans.map((n) => 'Workout ' + n).join(' and ')}. To archive it, remove it from the plan first.</p>`
       : html`<button class="btn btn-warn" style="align-self: flex-start" onClick=${() => { save({ archived: true }); toast(ex.name + ' archived. Its history is kept.'); }}>Archive</button>`}
@@ -1694,7 +1911,10 @@ function App() {
     else if (r.name === 'exercises') screen = html`<${Exercises} />`;
     else screen = html`<${Home} />`;
   }
-  return html`${screen}${d.toast ? html`<div class="toast" role="status">${d.toast}</div>` : null}`;
+  return html`${screen}${d.toast ? html`<div class="toast" role="status">
+    <span>${d.toast.msg}</span>
+    ${d.toast.action ? html`<button class="toast-action" onClick=${() => { setState({ toast: null }); d.toast.action.run(); }}>${d.toast.action.label}</button>` : null}
+  </div>` : null}`;
 }
 
 async function boot() {

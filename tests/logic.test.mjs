@@ -5,7 +5,8 @@ import {
   DEFAULT_SETTINGS, increase, decrease, startingSets, createSession, setsFromHistory,
   nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport,
   pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder, mergeExercisesFile,
-  schemeChange, previousSameType
+  schemeChange, previousSameType, suggestIncrease, daysSinceBackup, backupDue, weekKey, weeksInARow,
+  computeMilestones, liftedComparison, sessionVolume
 } from '../js/logic.js';
 import { QUOTES } from '../js/quotes.js';
 
@@ -290,4 +291,74 @@ test('plan update offer: set count or even reps differ from the plan', () => {
   assert.deepEqual(schemeChange(e([8, 8, 6, 6]), item).to, { sets: 4, reps: 8 }, 'uneven reps: only the set count changes');
   assert.equal(schemeChange(e([12, 12, 12], 'swapped'), item), null);
   assert.equal(schemeChange(e([12, 12, 12], 'added'), null), null);
+});
+
+// ---------- 1.8.0 ----------
+const doneSess = (id, day, sets, extra = {}) => ({ id, planId: 'A', startedAt: day + 'T10:00:00', finishedAt: day + 'T11:00:00',
+  entries: [{ id: id + 'e', exerciseId: 'x', planItemId: 'i1', kind: 'planned', status: 'done', doneAt: day + 'T10:30:00', sets }], ...extra });
+const s3 = (w, r = 8) => [{ weight: w, reps: r }, { weight: w, reps: r }, { weight: w, reps: r }];
+
+test('suggestion: two full times in a row at the same weights', () => {
+  const item = { id: 'i1', exerciseId: 'x', sets: 3, reps: 8 };
+  const cur = { id: 'c', exerciseId: 'x', planItemId: 'i1', kind: 'planned', status: 'open', sets: s3(50) };
+  const two = [doneSess('a', '2026-11-10', s3(50)), doneSess('b', '2026-11-12', s3(50))];
+  assert.equal(suggestIncrease(two, cur, item, { id: 'x' }, 'now'), true);
+  assert.equal(suggestIncrease(two.slice(1), cur, item, { id: 'x' }, 'now'), false, 'only once');
+  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(47.5)), two[1]], cur, item, {}, 'now'), false, 'weight changed');
+  assert.equal(suggestIncrease([two[0], doneSess('b', '2026-11-12', [{ weight: 50, reps: 8 }, { weight: 50, reps: 8 }, { weight: 50, reps: 6 }])], cur, item, {}, 'now'), false, 'reps missed');
+  assert.equal(suggestIncrease(two, cur, item, { noSuggest: true }, 'now'), false, 'switched off');
+  assert.equal(suggestIncrease(two, { ...cur, sets: s3(52.5) }, item, {}, 'now'), false, 'already raised today');
+  assert.equal(suggestIncrease(two, { ...cur, kind: 'added' }, item, {}, 'now'), false);
+  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(0)), doneSess('b', '2026-11-12', s3(0))], cur, item, {}, 'now'), false, 'bodyweight');
+  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(50, 10)), doneSess('b', '2026-11-12', s3(50, 9))], cur, item, {}, 'now'), true, 'more reps than planned is fine');
+});
+
+test('backup reminder after 30 days, Not now for 7', () => {
+  const now = Date.parse('2026-12-20T12:00:00Z');
+  const sess = [doneSess('a', '2026-11-10', s3(50))];
+  assert.equal(daysSinceBackup({}, [], now), null);
+  assert.equal(backupDue({ lastBackup: '2026-12-01T10:00:00Z' }, sess, now), false);
+  assert.equal(backupDue({ lastBackup: '2026-11-15T10:00:00Z' }, sess, now), true);
+  assert.equal(backupDue({ lastBackup: null }, sess, now), true, 'never backed up: counts from the first workout');
+  assert.equal(backupDue({ lastBackup: '2026-11-15T10:00:00Z', backupSnoozeUntil: '2026-12-25T10:00:00Z' }, sess, now), false);
+  assert.equal(backupDue({ lastBackup: '2026-11-15T10:00:00Z', backupSnoozeUntil: '2026-12-19T10:00:00Z' }, sess, now), true);
+});
+
+test('weeks in a row with 2+ workouts', () => {
+  assert.equal(weekKey('2026-11-22T10:00:00'), '2026-11-16', 'Sunday belongs to the week of Monday 16');
+  const ss = ['2026-11-02', '2026-11-04', '2026-11-09', '2026-11-12', '2026-11-16', '2026-11-18', '2026-11-23'].map((d, i) => doneSess('s' + i, d, s3(50)));
+  assert.equal(weeksInARow(ss, new Date('2026-11-24T12:00:00')), 3, 'this week has 1 so far: count up to last week');
+  assert.equal(weeksInARow([...ss, doneSess('t', '2026-11-25', s3(50))], new Date('2026-11-26T12:00:00')), 4);
+  assert.equal(weeksInARow(ss, new Date('2026-12-08T12:00:00')), 0);
+});
+
+test('milestones: unlocked by the workout that reaches them, next ones with progress', () => {
+  const days = ['2026-11-02', '2026-11-04', '2026-11-09', '2026-11-12', '2026-11-16', '2026-11-18'];
+  const ss = days.map((d, i) => doneSess('s' + i, d, s3(500 + i * 10)));  // 12+ t a workout, a record each time after the first
+  const m = computeMilestones(ss, new Date('2026-11-19T12:00:00'));
+  assert.equal(m.totals.workouts, 6);
+  assert.equal(m.totals.records, 5);
+  assert.equal(m.totals.weeks, 3);
+  const names = m.unlocked.map((u) => u.name);
+  assert.ok(names.includes('First workout') && names.includes('5 workouts') && names.includes('1 t lifted') && names.includes('6 t lifted') && names.includes('40 t lifted'));
+  assert.equal(m.unlocked.find((u) => u.name === '5 workouts').sessionId, 's4');
+  const next = Object.fromEntries(m.next.map((n) => [n.kind, n]));
+  assert.equal(next.workouts.at, 10);
+  assert.equal(next.weeks.at, 4);
+  assert.equal(next.records.at, 10);
+  assert.equal(next.lifted.at, 100000);
+  // repeats after the last step
+  const many = Array.from({ length: 151 }, (_, i) => doneSess('r' + i, new Date(Date.UTC(2025, 0, 1 + i)).toISOString().slice(0, 10), s3(10)));
+  const mm = computeMilestones(many, new Date('2026-01-01T12:00:00'));
+  assert.ok(mm.unlocked.some((u) => u.name === '150 workouts'));
+  assert.equal(mm.next.find((n) => n.kind === 'workouts').at, 200);
+});
+
+test('lifted-so-far comparison picks an object that fits at least twice', () => {
+  assert.match(liftedComparison(500, '2026-11-20'), /Not even a small car/);
+  assert.match(liftedComparison(1500, '2026-11-20'), /one small car/);
+  assert.match(liftedComparison(64800, '2026-11-20'), /About eleven elephants/);
+  assert.match(liftedComparison(250000, '2026-11-20'), /About (two|three) blue whales/);
+  assert.equal(liftedComparison(64800, '2026-11-20'), liftedComparison(64800, '2026-11-20'), 'same line all day');
+  assert.equal(sessionVolume(doneSess('a', '2026-11-10', s3(50))), 1200);
 });
