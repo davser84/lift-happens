@@ -5,11 +5,11 @@ import {
   createSession, startingSets, setsFromHistory, hasEmptyWeight, activePlans, nextPlanAfter,
   plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
   validateImport, buildExport, pickDailyQuote, localDayKey,
-  pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile
+  pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 
-const VERSION = '1.5.7';
+const VERSION = '1.6.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -129,11 +129,6 @@ function fmtDate(iso, withDay) {
 }
 const planName = (plan) => (plan ? 'Workout ' + plan.name : 'Workout');
 const hhmm = (iso) => { const d = new Date(iso); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
-function durationText(s) {
-  if (!s.finishedAt) return 'in progress';
-  const min = Math.max(1, Math.round((Date.parse(s.finishedAt) - Date.parse(s.startedAt)) / 60000));
-  return min < 60 ? min + ' min' : Math.floor(min / 60) + ' h ' + String(min % 60).padStart(2, '0') + ' min';
-}
 function reminderText(r) {
   const parts = [];
   if (r.dir === 'up') parts.push('↑ weight');
@@ -484,9 +479,26 @@ function Workout({ id }) {
   const [menu, setMenu] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [drag, setDrag] = useState(null);
+  const [planAsk, setPlanAsk] = useState(null);
   const dragRef = useRef(null);
   const suppressClick = useRef(false);
-  useWakeLock(d.settings.keepAwake);
+  const mainRef = useRef(null);
+  // A finished workout opened again is being edited: it stays finished (date and rotation unchanged).
+  const editing = !!(session && session.finishedAt);
+  useWakeLock(d.settings.keepAwake && !editing);
+
+  // With the reminder panel open, keep the exercise's Done button in view.
+  useEffect(() => {
+    if (!remPanel) return undefined;
+    const t = setTimeout(() => {
+      const main = mainRef.current;
+      const btn = main && main.querySelector('[data-done="' + remPanel + '"]');
+      if (!btn) return;
+      const r = btn.getBoundingClientRect(), m = main.getBoundingClientRect();
+      if (r.bottom > m.bottom - 8) main.scrollBy({ top: r.bottom - m.bottom + 16, behavior: 'smooth' });
+    }, 40);
+    return () => clearTimeout(t);
+  }, [remPanel, noteOpen]);
 
   useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
   if (!session) return null;
@@ -531,6 +543,26 @@ function Workout({ id }) {
     });
     clearEdit();
     if (!fromSwipe) setOpenId(settings.autoAdvance ? after : null);
+    // Different sets or reps than the plan: offer to update the plan (asked again only if they change again).
+    const curPlan = state.plans.find((p) => p.id === getSession(id).planId);
+    const item = curPlan ? curPlan.items.find((it) => it.id === e.planItemId) : null;
+    const ch = schemeChange(e, item);
+    if (ch && e.planAsked !== schemeLabel(ch.to)) {
+      setPlanAsk({ entryId: eid, itemId: item.id, name: (exById[e.exerciseId] || {}).name || 'Exercise', planLabel: planName(curPlan), ...ch });
+    }
+  };
+
+  const answerPlan = (update) => {
+    const a = planAsk;
+    setPlanAsk(null);
+    if (!a) return;
+    const label = schemeLabel(a.to);
+    patchEntry(a.entryId, (x) => (update ? { ...x, plannedSets: a.to.sets, appliedScheme: label, planAsked: label } : { ...x, planAsked: label }));
+    if (!update) return;
+    const cur = state.plans.find((p) => p.id === getSession(id).planId);
+    if (!cur) return;
+    savePlan({ ...cur, items: cur.items.map((it) => (it.id === a.itemId ? { ...it, sets: a.to.sets, reps: a.to.reps } : it)) });
+    toast(planName(cur) + ' updated: ' + a.name + ' is now ' + label + '.');
   };
 
   const skip = (e) => {
@@ -620,6 +652,13 @@ function Workout({ id }) {
   const finalize = (skipOpen) => {
     const cur = getSession(id);
     const entriesNext = cur.entries.map((e) => (skipOpen && e.status === 'open' ? { ...e, status: 'skipped' } : e));
+    if (editing) {
+      // Editing a finished workout: keep its date and leave the rotation alone.
+      saveSession({ ...cur, entries: entriesNext });
+      setConfirmFinish(false);
+      go({ name: 'summary', id, edited: true });
+      return;
+    }
     saveSession({ ...cur, entries: entriesNext, finishedAt: new Date().toISOString() });
     const next = nextPlanAfter(state.plans, cur.planId);
     if (next) saveSettings({ nextPlanId: next });
@@ -701,7 +740,7 @@ function Workout({ id }) {
     const cur = getSession(id);
     go({ name: 'home' });
     if (cur) removeSession(cur);
-    toast(cur && cur.firstFinishedAt ? 'Workout deleted.' : 'Workout cancelled. Nothing was saved.');
+    toast(editing ? 'Workout deleted.' : 'Workout cancelled. Nothing was saved.');
   };
 
   const card = (e) => {
@@ -741,11 +780,11 @@ function Workout({ id }) {
 
     return html`<div key=${e.id} class="swipe-wrap">
       ${dx > 0 ? html`<div class="swipe-under" style=${'opacity:' + Math.min(1, dx / 90)}><span><${Icon} name="check" sw=${3} /> Done</span></div>` : null}
-      <section class=${'card ex-card' + (open ? ' open' : '') + (open && e.status === 'open' ? ' live' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
+      <section class=${'card ex-card' + (open ? ' open' : '') + (open && e.status === 'open' && !editing ? ' live' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
         <button class="ex-head" aria-expanded=${open} ...${swipeHandlers(e, canSwipe)}
           onClick=${() => { if (suppressClick.current) return; clearEdit(); setOpenId(open ? null : e.id); }}>
           <div class="ex-head-text">
-            <span class="ex-name">${open && e.status === 'open' ? html`<span class="live-dot" aria-label="In progress"></span>` : null}${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
+            <span class="ex-name">${open && e.status === 'open' && !editing ? html`<span class="live-dot" aria-label="In progress"></span>` : null}${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
             <span class="small muted num">${e.sets.length} × ${rTxt} · ${wTxt}</span>
             ${tags.length ? html`<span class="ex-tag">${tags.join(' · ')}</span>` : null}
             ${inChips.length ? html`<span class="rem-chips">${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}</span>` : null}
@@ -814,8 +853,8 @@ function Workout({ id }) {
           ${remOpen ? html`<div class="rem-panel">
             <span class="rem-label" style="color: var(--muted)">For next time</span>
             <div class="grid-2">
-              <button class=${'chip-btn' + (myRem.dir === 'up' ? ' on' : '')} aria-pressed=${myRem.dir === 'up'} onClick=${() => setReminder(e.id, { dir: myRem.dir === 'up' ? null : 'up' })}>↑ Weight</button>
-              <button class=${'chip-btn' + (myRem.dir === 'down' ? ' on' : '')} aria-pressed=${myRem.dir === 'down'} onClick=${() => setReminder(e.id, { dir: myRem.dir === 'down' ? null : 'down' })}>↓ Weight</button>
+              <button class=${'chip-btn' + (myRem.dir === 'up' ? ' on' : '')} aria-pressed=${myRem.dir === 'up'} onClick=${() => { setReminder(e.id, { dir: myRem.dir === 'up' ? null : 'up' }); setRemPanel(null); }}>↑ Weight</button>
+              <button class=${'chip-btn' + (myRem.dir === 'down' ? ' on' : '')} aria-pressed=${myRem.dir === 'down'} onClick=${() => { setReminder(e.id, { dir: myRem.dir === 'down' ? null : 'down' }); setRemPanel(null); }}>↓ Weight</button>
             </div>
             <span class="tiny muted">Change scheme</span>
             <div class="grid-4">
@@ -835,8 +874,8 @@ function Workout({ id }) {
             <span class="tiny muted">Shown next time you do ${ex.name}, in any workout.</span>
           </div>` : null}
           ${isDone
-            ? html`<button class="btn" style="margin-top: 6px" onClick=${() => patchEntry(e.id, (x) => ({ ...x, status: 'open', doneAt: null }))}>Mark as not done</button>`
-            : html`<button class="btn btn-primary btn-big" style="margin-top: 6px; border-radius: 12px" onClick=${() => markDone(e.id, false)}><${Icon} name="check" sw=${3} /> Done · next exercise</button>`}
+            ? html`<button class="btn" data-done=${e.id} style="margin-top: 6px" onClick=${() => patchEntry(e.id, (x) => ({ ...x, status: 'open', doneAt: null }))}>Mark as not done</button>`
+            : html`<button class="btn btn-primary btn-big" data-done=${e.id} style="margin-top: 6px; border-radius: 12px" onClick=${() => markDone(e.id, false)}><${Icon} name="check" sw=${3} /> Done · next exercise</button>`}
           `}
         </div>` : null}
       </section>
@@ -846,9 +885,11 @@ function Workout({ id }) {
   return html`<div class="screen">
     <div class="header">
       <div class="header-row">
-        <button class="icon-btn back" aria-label="Back to Today" onClick=${() => go({ name: 'home' })}><${Icon} name="back" size=${22} /></button>
+        ${editing
+          ? html`<span class="section-label" style="margin: 0">Editing</span>`
+          : html`<button class="icon-btn back" aria-label="Back to Today" onClick=${() => go({ name: 'home' })}><${Icon} name="back" size=${22} /></button>`}
         <div style="display: flex; align-items: center; gap: 2px">
-          <span class="small muted">${fmtDate(session.startedAt, true)}</span>
+          <span class="small muted">${fmtDate(session.startedAt, true)}${editing ? ' · ' + hhmm(session.startedAt) : ''}</span>
           <button class="icon-btn" style="margin-right: -10px" aria-label="Workout options" onClick=${() => setMenu(true)}><${Icon} name="more" size=${24} sw=${3.5} /></button>
         </div>
       </div>
@@ -857,15 +898,16 @@ function Workout({ id }) {
         <div class="bar"><div style=${'width:' + Math.round((handled / Math.max(1, entries.length)) * 100) + '%'}></div></div>
         <span class="small muted num">${handled} / ${entries.length} exercises</span>
       </div>
-      ${handled < 2 ? html`<span class="tiny muted">Swipe right on an exercise to mark it Done without opening it.</span>` : null}
+      ${settings.showQuote && settings.dailyQuote && QUOTES[settings.dailyQuote.index]
+        ? html`<p class="quote quote-go">${QUOTES[settings.dailyQuote.index]}</p>` : null}
     </div>
-    <div class="main">
+    <div class="main" ref=${mainRef}>
       ${pending.map(card)}
       ${handledList.length ? html`<h2 class="section-label">Done & skipped · ${handledList.length}</h2>` : null}
       ${handledList.map(card)}
       <button class="btn-dashed" style="margin-top: 4px" onClick=${() => setSheet({ mode: 'add' })}><${Icon} name="plus" size=${18} sw=${2.2} /> Add exercise (today only)</button>
     </div>
-    <div class="footer"><button class="btn btn-big btn-outline" onClick=${finish}>Finish workout</button></div>
+    <div class="footer"><button class="btn btn-big btn-outline" onClick=${finish}>${editing ? 'Save' : 'Finish workout'}</button></div>
 
     ${sheet && sheet.mode === 'swap' ? html`<${ExercisePicker} title=${'Swap ' + sheet.from + ' for…'} showLast=${true}
       sub=${'Logged today only. Next time the plan shows ' + sheet.from + ' again, with its usual weights.'}
@@ -878,7 +920,7 @@ function Workout({ id }) {
       <div class="sheet" role="dialog" aria-label="Workout options">
         <div class="sheet-head"><h2>${planName(plan)}</h2><p class="small muted">Started ${fmtDate(session.startedAt, true)}</p></div>
         <div style="padding: 0 16px; display: flex; flex-direction: column; gap: 8px">
-          <button class="btn btn-big btn-warn" onClick=${() => { setMenu(false); setConfirmCancel(true); }}><${Icon} name="trash" size=${18} /> ${session.firstFinishedAt ? 'Delete workout' : 'Cancel workout'}</button>
+          <button class="btn btn-big btn-warn" onClick=${() => { setMenu(false); setConfirmCancel(true); }}><${Icon} name="trash" size=${18} /> ${editing ? 'Delete workout' : 'Cancel workout'}</button>
         </div>
         <div class="sheet-foot"><button class="btn btn-big" onClick=${() => setMenu(false)}>Close</button></div>
       </div>
@@ -886,25 +928,37 @@ function Workout({ id }) {
 
     ${confirmCancel ? html`<div class="overlay center">
       <div class="dialog" role="alertdialog" aria-labelledby="cancel-title">
-        <h2 id="cancel-title">${session.firstFinishedAt ? 'Delete this workout?' : 'Cancel this workout?'}</h2>
-        <p style="line-height: 1.45">${session.firstFinishedAt
+        <h2 id="cancel-title">${editing ? 'Delete this workout?' : 'Cancel this workout?'}</h2>
+        <p style="line-height: 1.45">${editing
           ? 'It disappears from the log, with its sets and reminders. Starting weights and records are recalculated without it.'
           : 'Nothing from today is saved: no sets, no reminders. ' + planName(plan) + ' stays up next, with the usual weights.'}</p>
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
-          <button class="btn btn-primary btn-big" autofocus onClick=${() => setConfirmCancel(false)}>${session.firstFinishedAt ? 'Keep it' : 'Keep training'}</button>
-          <button class="btn btn-big btn-warn" onClick=${doCancel}>${session.firstFinishedAt ? 'Delete workout' : 'Cancel workout'}</button>
+          <button class="btn btn-primary btn-big" autofocus onClick=${() => setConfirmCancel(false)}>${editing ? 'Keep it' : 'Keep training'}</button>
+          <button class="btn btn-big btn-warn" onClick=${doCancel}>${editing ? 'Delete workout' : 'Cancel workout'}</button>
         </div>
       </div>
     </div>` : null}
 
     ${confirmFinish ? html`<div class="overlay center">
       <div class="dialog" role="alertdialog" aria-labelledby="finish-title">
-        <h2 id="finish-title">Workout not complete</h2>
+        <h2 id="finish-title">${editing ? 'Some exercises are not done' : 'Workout not complete'}</h2>
         <p style="line-height: 1.45">${openEntries.length} ${openEntries.length === 1 ? 'exercise' : 'exercises'} not done: ${openEntries.map((e) => (exById[e.exerciseId] || {}).name).join(', ')}</p>
-        <p class="small muted" style="line-height: 1.45">If you finish now, they are logged as skipped and come back next time with the same weights.</p>
+        <p class="small muted" style="line-height: 1.45">${editing ? 'If you save now, they are logged as skipped.' : 'If you finish now, they are logged as skipped and come back next time with the same weights.'}</p>
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
           <button class="btn btn-primary btn-big" autofocus onClick=${() => { setConfirmFinish(false); if (openEntries[0]) setOpenId(openEntries[0].id); }}>Back to workout</button>
-          <button class="btn btn-big btn-warn" onClick=${() => finalize(true)}>Finish anyway</button>
+          <button class="btn btn-big btn-warn" onClick=${() => finalize(true)}>${editing ? 'Save anyway' : 'Finish anyway'}</button>
+        </div>
+      </div>
+    </div>` : null}
+
+    ${planAsk ? html`<div class="overlay center">
+      <div class="dialog" role="alertdialog" aria-labelledby="plan-ask-title">
+        <h2 id="plan-ask-title">Update ${planAsk.planLabel}?</h2>
+        <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: plan ${schemeLabel(planAsk.from)} → this workout ${schemeLabel(planAsk.to)}.</p>
+        <p class="small muted" style="line-height: 1.45">Update plan: ${planAsk.planLabel} uses ${schemeLabel(planAsk.to)} from the next time. Only this workout: the plan stays ${schemeLabel(planAsk.from)}.</p>
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
+          <button class="btn btn-primary btn-big" autofocus onClick=${() => answerPlan(true)}>Update plan</button>
+          <button class="btn btn-big" onClick=${() => answerPlan(false)}>Only this workout</button>
         </div>
       </div>
     </div>` : null}
@@ -915,39 +969,29 @@ function Workout({ id }) {
 // Finish summary
 // ======================================================================
 
-function Summary({ id }) {
-  const d = useStore();
-  const session = d.sessions.find((s) => s.id === id);
-  useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
-  if (!session) return null;
-  const plan = d.plans.find((p) => p.id === session.planId);
-  const next = d.plans.find((p) => p.id === d.settings.nextPlanId);
-  const sum = sessionSummary(session, d.sessions, exMap(), plan);
+// Comparison cards: shown at the end of a workout (live) and at the bottom of every workout log.
+function SummaryCards({ sum, plan, live }) {
   const maxAbs = Math.max(0, ...sum.rows.filter((r) => r.delta !== null && !r.bodyweight).map((r) => Math.abs(r.delta)));
   const volPct = sum.volPct === null ? '—' : (sum.volPct > 0 ? '+' : sum.volPct < 0 ? '−' : '±') + Math.abs(sum.volPct).toFixed(1) + '%';
-  const reopen = () => {
-    saveSession({ ...session, finishedAt: null, firstFinishedAt: session.firstFinishedAt || session.finishedAt });
-    go({ name: 'workout', id });
-  };
-
-  return html`<div class="screen">
-    <div class="main" style="padding: calc(var(--safe-top) + var(--top-gap)) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
-      <${AppFace} size=${140} wink=${true} style="align-self: center" />
-      <div style="display: flex; align-items: center; gap: 12px">
-        <span class="check-badge" style="width: 44px; height: 44px; border-radius: 22px"><${Icon} name="check" size=${24} sw=${3} /></span>
-        <div style="display: flex; flex-direction: column; gap: 2px">
-          <h1 style="font-size: 24px; font-weight: 700">${planName(plan)} saved</h1>
-          <span class="small muted">${sum.setsLogged} sets logged · ${sum.skipped} skipped · next up: ${planName(next)}</span>
-          <span class="small muted">Saved automatically. You can close the app.</span>
-        </div>
-      </div>
-
+  const kg = (v) => Math.round(v).toLocaleString('en') + ' kg';
+  const here = live ? 'today' : 'this workout';
+  let volTitle = 'Total volume vs last ' + planName(plan);
+  let volText;
+  if (sum.volBase === 'previous' && sum.volLast > 0) {
+    volText = 'Last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + '): ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (weight × reps, exercises done both times)';
+  } else if (sum.volBase === 'previous') {
+    volText = 'No exercises in common with the last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + ').';
+  } else if (sum.volBase === 'plan') {
+    volTitle = 'Total volume vs plan';
+    volText = 'First ' + planName(plan) + ': compared with the plan’s starting weights. Plan: ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (weight × reps)';
+  } else {
+    volText = 'Nothing to compare yet: this is the first ' + planName(plan) + '.';
+  }
+  return html`
       <section class="card card-pad">
-        <span class="section-label" style="margin: 0">Total volume vs last time</span>
+        <span class="section-label" style="margin: 0">${volTitle}</span>
         <span class="hero-num num">${volPct}</span>
-        <span class="small muted num">${sum.volLast > 0
-          ? 'Last ' + Math.round(sum.volLast).toLocaleString('en') + ' kg · today ' + Math.round(sum.volToday).toLocaleString('en') + ' kg (weight × reps, same exercises)'
-          : 'Nothing to compare yet: these exercises have no earlier session.'}${sum.rows.some((r) => r.vsPlan) ? '. First time: compared with the plan’s starting weights.' : ''}</span>
+        <span class="small muted num">${volText}</span>
       </section>
 
       <section class="card card-pad" style="gap: 12px">
@@ -980,9 +1024,34 @@ function Summary({ id }) {
             </div>`;
           }) : html`<p class="small muted">No exercises were confirmed.</p>`}
         </div>
-      </section>
+      </section>`;
+}
 
-      <p class="small muted" style="line-height: 1.5">Today’s weights are the starting point next time you do these exercises, in any workout. Sets and reps still come from the plan.</p>
+function Summary({ id, edited }) {
+  const d = useStore();
+  const session = d.sessions.find((s) => s.id === id);
+  useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
+  if (!session) return null;
+  const plan = d.plans.find((p) => p.id === session.planId);
+  const next = d.plans.find((p) => p.id === d.settings.nextPlanId);
+  const sum = sessionSummary(session, d.sessions, exMap(), plan);
+  const reopen = () => go({ name: 'workout', id });
+
+  return html`<div class="screen">
+    <div class="main" style="padding: calc(var(--safe-top) + var(--top-gap)) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
+      <${AppFace} size=${140} wink=${true} style="align-self: center" />
+      <div style="display: flex; align-items: center; gap: 12px">
+        <span class="check-badge" style="width: 44px; height: 44px; border-radius: 22px"><${Icon} name="check" size=${24} sw=${3} /></span>
+        <div style="display: flex; flex-direction: column; gap: 2px">
+          <h1 style="font-size: 24px; font-weight: 700">${planName(plan)} saved</h1>
+          <span class="small muted">${sum.setsLogged} sets logged · ${sum.skipped} skipped · next up: ${planName(next)}</span>
+          <span class="small muted">Saved automatically. You can close the app.</span>
+        </div>
+      </div>
+
+      <${SummaryCards} sum=${sum} plan=${plan} live=${true} />
+
+      ${edited ? null : html`<p class="small muted" style="line-height: 1.5">Today’s weights are the starting point next time you do these exercises, in any workout. Sets and reps still come from the plan.</p>`}
       <button class="btn btn-primary btn-big" onClick=${() => go({ name: 'home' })}><${Icon} name="home" /> Back to Home</button>
       <button class="btn btn-ghost" onClick=${reopen}>Edit this workout</button>
     </div>
@@ -1165,10 +1234,10 @@ function WorkoutHistory() {
         return html`<button key=${s.id} class="card card-pad" style="text-align: left; padding: 14px; gap: 6px"
           onClick=${() => go(s.finishedAt ? { name: 'session', id: s.id } : { name: 'workout', id: s.id })}>
           <span style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px">
-            <span style="font-size: 17px; font-weight: 600">${fmtDate(s.startedAt, true)}</span>
+            <span style="font-size: 17px; font-weight: 600">${fmtDate(s.startedAt, true)} · ${hhmm(s.startedAt)}</span>
             <span class="small muted">${planName(plan)}</span>
           </span>
-          <span class="small muted">${durationText(s)} · ${done.length} ${done.length === 1 ? 'exercise' : 'exercises'} done</span>
+          <span class="small muted">${done.length} ${done.length === 1 ? 'exercise' : 'exercises'} done</span>
           ${tags.length ? html`<span class="tags">${tags.map(([t, k]) => html`<span key=${t} class=${'tag ' + k}>${t}</span>`)}</span>` : null}
         </button>`;
       })}
@@ -1195,10 +1264,7 @@ function SessionDetail({ id, from }) {
   const finished = d.sessions.filter((s) => s.finishedAt).sort((a, b) => Date.parse(b.finishedAt) - Date.parse(a.finishedAt));
   const isLatest = finished[0] && finished[0].id === session.id;
 
-  const edit = () => {
-    saveSession({ ...session, finishedAt: null, firstFinishedAt: session.firstFinishedAt || session.finishedAt });
-    go({ name: 'workout', id });
-  };
+  const edit = () => go({ name: 'workout', id });
   const del = () => {
     setConfirm(false);
     go({ name: from === 'home' ? 'home' : 'progress' });
@@ -1210,7 +1276,7 @@ function SessionDetail({ id, from }) {
     <div class="header" style="gap: 6px">
       <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: from === 'home' ? 'home' : 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />${from === 'home' ? 'Today' : 'Workouts'}</button>
       <h1 class="title">${planName(plan)}</h1>
-      <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}–${hhmm(session.finishedAt)} · ${durationText(session)}</span>
+      <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}</span>
     </div>
     <div class="main">
       <span class="section-label">Done, in this order · ${done.length}</span>
@@ -1241,6 +1307,8 @@ function SessionDetail({ id, from }) {
         <div class="card" style="padding: 4px 14px">
           ${reminders.map((e) => html`<div key=${e.id} class="small" style="padding: 8px 0; color: var(--text-2)"><strong style="color: var(--text)">${name(e.exerciseId)}</strong> · ${reminderText(e.reminder)}</div>`)}
         </div>` : null}
+
+      <${SummaryCards} sum=${sum} plan=${plan} live=${false} />
 
       <div class="grid-2" style="margin-top: 10px">
         <button class="btn btn-big" onClick=${edit}>Edit workout</button>
@@ -1590,7 +1658,7 @@ function App() {
   else {
     const r = d.route;
     if (r.name === 'workout') screen = html`<${Workout} key=${r.id} id=${r.id} />`;
-    else if (r.name === 'summary') screen = html`<${Summary} id=${r.id} />`;
+    else if (r.name === 'summary') screen = html`<${Summary} id=${r.id} edited=${!!r.edited} />`;
     else if (r.name === 'plans') screen = html`<${Plans} />`;
     else if (r.name === 'progress') screen = html`<${Progress} />`;
     else if (r.name === 'session') screen = html`<${SessionDetail} key=${r.id} id=${r.id} from=${r.from} />`;
@@ -1607,6 +1675,17 @@ async function boot() {
   try {
     const data = await db.loadAll();
     const settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+    // Up to 1.5.7, "Edit" reopened a finished workout (finishedAt cleared, kept in firstFinishedAt).
+    // Editing no longer reopens: give such workouts back their original finish time.
+    for (let i = 0; i < data.sessions.length; i++) {
+      const s = data.sessions[i];
+      if (!s.finishedAt && s.firstFinishedAt) {
+        const fixed = { ...s, finishedAt: s.firstFinishedAt };
+        delete fixed.firstFinishedAt;
+        data.sessions[i] = fixed;
+        try { await db.put('sessions', fixed); } catch (err) { console.warn('Could not save the fixed workout', err); }
+      }
+    }
     const open = data.sessions.find((s) => !s.finishedAt);
     setState({
       loaded: true,

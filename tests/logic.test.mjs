@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, increase, decrease, startingSets, createSession, setsFromHistory,
   nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport,
-  pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder, mergeExercisesFile
+  pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder, mergeExercisesFile,
+  schemeChange, previousSameType
 } from '../js/logic.js';
 import { QUOTES } from '../js/quotes.js';
 
@@ -240,4 +241,53 @@ test('exercises file is merged by name, duplicates skipped', () => {
   assert.equal(r.added[1].startWeight, 26);
   assert.equal(r.added[1].equipment, 'dumbbell');
   assert.throws(() => mergeExercisesFile({ app: 'x' }, existing));
+});
+
+test('summary: volume vs the previous workout of the same type, exercises vs their last time anywhere', () => {
+  const ex = { x: { name: 'Face Pull' }, y: { name: 'Leg Press' } };
+  const a1 = { id: 'a1', planId: 'A', startedAt: '2026-11-10T10:00:00Z', finishedAt: '2026-11-10T11:00:00Z',
+    entries: [entry('x', [{ weight: 100, reps: 8 }]), entry('y', [{ weight: 50, reps: 8 }], 'skipped')] };
+  const b1 = { id: 'b1', planId: 'B', startedAt: '2026-11-12T10:00:00Z', finishedAt: '2026-11-12T11:00:00Z',
+    entries: [entry('x', [{ weight: 120, reps: 8 }])] };
+  const a2 = { id: 'a2', planId: 'A', startedAt: '2026-11-14T10:00:00Z', finishedAt: '2026-11-14T11:00:00Z',
+    entries: [entry('x', [{ weight: 110, reps: 8 }]), entry('y', [{ weight: 60, reps: 8 }])] };
+  const all = [a1, b1, a2];
+  assert.equal(previousSameType(a2, all).id, 'a1');
+  const sum = sessionSummary(a2, all, ex);
+  assert.equal(sum.volBase, 'previous');
+  assert.equal(sum.volPrev.id, 'a1');
+  assert.equal(sum.volLast, 800, 'only Face Pull: Leg Press was skipped in the last A');
+  assert.equal(sum.volToday, 880);
+  assert.equal(Math.round(sum.volPct), 10);
+  assert.equal(sum.rows.find((r) => r.name === 'Face Pull').delta, -10, 'exercise compared with B (its last time)');
+  // A log reopened later still compares with the workouts before it
+  const a3 = { id: 'a3', planId: 'A', startedAt: '2026-11-16T10:00:00Z', finishedAt: '2026-11-16T11:00:00Z', entries: [entry('x', [{ weight: 130, reps: 8 }])] };
+  assert.equal(sessionSummary(a2, [...all, a3], ex).volLast, 800);
+});
+
+test('summary: first workout of a type compares volume with the plan, else nothing', () => {
+  const plan = { id: 'B', items: [{ id: 'i1', exerciseId: 'x', sets: 3, reps: 8, weight: 20 }] };
+  const a1 = { id: 'a1', planId: 'A', startedAt: '2026-11-10T10:00:00Z', finishedAt: '2026-11-10T11:00:00Z', entries: [entry('x', [{ weight: 25, reps: 8 }])] };
+  const b1 = { id: 'b1', planId: 'B', startedAt: '2026-11-12T10:00:00Z', finishedAt: '2026-11-12T11:00:00Z',
+    entries: [{ id: 'e', exerciseId: 'x', planItemId: 'i1', kind: 'planned', status: 'done', sets: [{ weight: 25, reps: 8 }, { weight: 25, reps: 8 }, { weight: 25, reps: 8 }] }] };
+  const sum = sessionSummary(b1, [a1, b1], { x: { name: 'Face Pull' } }, plan);
+  assert.equal(sum.volBase, 'plan');
+  assert.equal(sum.volLast, 480);
+  assert.equal(sum.volToday, 600);
+  assert.equal(sum.rows[0].delta, 0, 'the exercise row still compares with its last time (A, 25 kg)');
+  const none = sessionSummary(b1, [a1, b1], { x: { name: 'Face Pull' } }, { id: 'B', items: [{ id: 'i1', exerciseId: 'x', sets: 3, reps: 8, weight: null }] });
+  assert.equal(none.volBase, null);
+  assert.equal(none.volPct, null);
+});
+
+test('plan update offer: set count or even reps differ from the plan', () => {
+  const item = { sets: 3, reps: 8 };
+  const e = (reps, kind = 'planned') => ({ kind, sets: reps.map((r) => ({ weight: 20, reps: r })) });
+  assert.equal(schemeChange(e([8, 8, 8]), item), null);
+  assert.deepEqual(schemeChange(e([12, 12, 12]), item), { from: { sets: 3, reps: 8 }, to: { sets: 3, reps: 12 } });
+  assert.deepEqual(schemeChange(e([8, 8, 8, 8]), item), { from: { sets: 3, reps: 8 }, to: { sets: 4, reps: 8 } });
+  assert.equal(schemeChange(e([8, 8, 6]), item), null, 'tired last set is not a new scheme');
+  assert.deepEqual(schemeChange(e([8, 8, 6, 6]), item).to, { sets: 4, reps: 8 }, 'uneven reps: only the set count changes');
+  assert.equal(schemeChange(e([12, 12, 12], 'swapped'), item), null);
+  assert.equal(schemeChange(e([12, 12, 12], 'added'), null), null);
 });

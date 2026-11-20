@@ -186,6 +186,9 @@ export function plannedPlanId(plans, settings) {
 
 // ---------- summary after a workout ----------
 
+// Each exercise is compared with the last time it was done, in any workout.
+// Total volume is compared with the previous workout of the same type (A with A, B with B),
+// counting only exercises done both times; the first workout of a type uses the plan's weights.
 export function sessionSummary(session, sessions, exercisesById, plan = null) {
   const before = ts(session.startedAt);
   const opts = { excludeSessionId: session.id, before };
@@ -213,10 +216,6 @@ export function sessionSummary(session, sessions, exercisesById, plan = null) {
     if (prev) {
       delta = bodyweight ? totalReps - prev.totalReps : round2(top - prev.top);
       if (delta > 0) heavier++; else if (delta < 0) lighter++; else same++;
-      if (!bodyweight) {
-        volLast += prev.volume;
-        volToday += e.sets.reduce((a, x) => a + (x.weight || 0) * (x.reps || 0), 0);
-      }
     }
     let record = null;
     if (hist.length) {
@@ -247,15 +246,60 @@ export function sessionSummary(session, sessions, exercisesById, plan = null) {
     });
   }
   const done = session.entries.filter((e) => e.status === 'done');
+  const volOf = (e) => (e.sets || []).reduce((a, x) => a + (x.weight || 0) * (x.reps || 0), 0);
+  const prevSame = previousSameType(session, sessions);
+  let volBase = null;
+  if (prevSame) {
+    const prevBy = {}, hereBy = {};
+    for (const e of prevSame.entries || []) if (e.status === 'done' && e.sets && e.sets.length) prevBy[e.exerciseId] = (prevBy[e.exerciseId] || 0) + volOf(e);
+    for (const e of done) hereBy[e.exerciseId] = (hereBy[e.exerciseId] || 0) + volOf(e);
+    for (const k of Object.keys(hereBy)) if (k in prevBy) { volLast += prevBy[k]; volToday += hereBy[k]; }
+    volBase = 'previous';
+  } else if (plan) {
+    for (const e of done) {
+      const item = e.kind === 'planned' ? plan.items.find((it) => it.id === e.planItemId) : null;
+      if (!item || item.weight === null || item.weight === undefined) continue;
+      volLast += item.weight * item.reps * item.sets;
+      volToday += volOf(e);
+    }
+    if (volLast > 0) volBase = 'plan';
+  }
   return {
     rows,
     volLast,
     volToday,
+    volBase,
+    volPrev: prevSame ? { id: prevSame.id, startedAt: prevSame.startedAt } : null,
     volPct: volLast > 0 ? (volToday / volLast - 1) * 100 : null,
     heavier, lighter, same, records,
     setsLogged: done.reduce((a, e) => a + e.sets.length, 0),
     skipped: session.entries.filter((e) => e.status === 'skipped').length
   };
+}
+
+// The latest finished workout of the same type that started before this one.
+export function previousSameType(session, sessions) {
+  const t = ts(session.startedAt);
+  let best = null;
+  for (const s of sessions) {
+    if (s.id === session.id || s.planId !== session.planId || !s.finishedAt || ts(s.startedAt) >= t) continue;
+    if (!best || ts(s.startedAt) > ts(best.startedAt)) best = s;
+  }
+  return best;
+}
+
+// ---------- plan updates from a workout ----------
+
+// When an exercise is confirmed with a different number of sets, or with the same reps in every set
+// but a different number than the plan, returns { from, to } to offer updating the plan; else null.
+// Uneven reps (e.g. 8, 8, 6) are a tired last set, not a new scheme: then only the set count counts.
+export function schemeChange(entry, item) {
+  if (!entry || !item || entry.kind !== 'planned' || !entry.sets || !entry.sets.length) return null;
+  const reps = entry.sets[0].reps;
+  const even = entry.sets.every((x) => x.reps === reps);
+  const to = { sets: entry.sets.length, reps: even ? reps : item.reps };
+  if (to.sets === item.sets && to.reps === item.reps) return null;
+  return { from: { sets: item.sets, reps: item.reps }, to };
 }
 
 // ---------- personal record ----------
