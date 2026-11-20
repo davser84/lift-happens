@@ -10,7 +10,7 @@ import {
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -212,6 +212,17 @@ function Sheet({ title, sub, children, onClose, footer }) {
   </div>`;
 }
 
+// One exercise in a choose-an-exercise list: name, detail below it, icon on the right.
+function ExPickRow({ ex, sub, onClick }) {
+  return html`<button class="sheet-item ex-pick" onClick=${onClick}>
+    <span class="ex-pick-text">
+      <span class="ex-pick-name">${ex.name}</span>
+      ${sub ? html`<span class="small muted num">${sub}</span>` : null}
+    </span>
+    <${ExIcon} id=${ex.id} />
+  </button>`;
+}
+
 // Exercise picker with "create new" field; used by Workout (swap/add) and Plans (add/replace).
 function ExercisePicker({ title, sub, exclude, onPick, onClose, showLast }) {
   const [name, setName] = useState('');
@@ -232,9 +243,7 @@ function ExercisePicker({ title, sub, exclude, onPick, onClose, showLast }) {
   return html`<${Sheet} title=${title} sub=${sub} onClose=${onClose} footer=${footer}>
     ${list.length ? list.map((e) => {
       const last = showLast ? lastWeightText(e.id) : '';
-      return html`<button key=${e.id} class="sheet-item" onClick=${() => onPick(e.id)}>
-        <span>${e.name}</span><span class="small muted num">${last}</span>
-      </button>`;
+      return html`<${ExPickRow} key=${e.id} ex=${e} sub=${last} onClick=${() => onPick(e.id)} />`;
     }) : html`<p class="small muted" style="padding: 10px">No other exercises in the catalog yet. Create one above.</p>`}
   <//>`;
 }
@@ -1460,9 +1469,8 @@ function ExerciseProgress() {
     ${picker ? html`<${Sheet} title="Choose an exercise" onClose=${() => setPicker(false)}>
       ${d.exercises.filter((e) => !e.archived).sort((a, b) => a.name.localeCompare(b.name)).map((e) => {
         const n = exerciseHistory(d.sessions, e.id).length;
-        return html`<button key=${e.id} class="sheet-item" onClick=${() => { setExId(e.id); setSel(null); setAll(false); setPicker(false); }}>
-          <span>${e.name}</span><span class="small muted">${n ? n + (n === 1 ? ' session' : ' sessions') : inPlans(e.id) ? 'Workout ' + inPlans(e.id) : ''}</span>
-        </button>`;
+        return html`<${ExPickRow} key=${e.id} ex=${e} sub=${n ? n + (n === 1 ? ' session' : ' sessions') : inPlans(e.id) ? 'Workout ' + inPlans(e.id) : ''}
+          onClick=${() => { setExId(e.id); setSel(null); setAll(false); setPicker(false); }} />`;
       })}
     <//>` : null}
     <${Nav} active="progress" />
