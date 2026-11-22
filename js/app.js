@@ -12,7 +12,7 @@ import {
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.9.0';
+const VERSION = '1.9.1';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -443,7 +443,6 @@ function Home() {
   const planned = plannedPlanId(d.plans, d.settings);
   const todayId = override || planned;
   const plan = plans.find((p) => p.id === todayId);
-  const exById = exMap();
   const finished = d.sessions.filter((s) => s.finishedAt).sort((a, b) => Date.parse(b.finishedAt) - Date.parse(a.finishedAt));
   const last = finished[0];
   const lastPlan = last ? d.plans.find((p) => p.id === last.planId) : null;
@@ -459,8 +458,6 @@ function Home() {
     if (window.confirm('Discard the workout in progress? Its log will be deleted.')) removeSession(open);
   };
 
-  const names = plan ? plan.items.map((it) => (exById[it.exerciseId] || {}).name).filter(Boolean) : [];
-  const preview = names.slice(0, 4).join(' · ') + (names.length > 4 ? ' + ' + (names.length - 4) + ' more' : '');
   const showBackup = backupDue(d.settings, d.sessions);
   const backupDays = showBackup ? daysSinceBackup(d.settings, d.sessions) : null;
   const notNow = () => saveSettings({ backupSnoozeUntil: new Date(Date.now() + 7 * 86400000).toISOString() });
@@ -477,7 +474,7 @@ function Home() {
       ${d.settings.showQuote && d.settings.dailyQuote && QUOTES[d.settings.dailyQuote.index]
         ? html`<p class="quote">${QUOTES[d.settings.dailyQuote.index]}</p>` : null}
     </div>
-    <div class="main" style="gap: 16px; padding-top: 16px">
+    <div class="main" style="gap: 12px; padding-top: 12px">
       ${showBackup ? html`<section class="card card-pad backup-card" aria-label="Backup reminder">
         <div style="display: flex; gap: 12px; align-items: flex-start">
           <span class="backup-icon"><${Icon} name="download" size=${20} /></span>
@@ -497,13 +494,12 @@ function Home() {
         <p class="small muted">Started ${fmtDate(open.startedAt, true)} · ${open.entries.filter((e) => e.status !== 'open').length} of ${open.entries.length} exercises handled</p>
         <button class="btn btn-go btn-big" onClick=${() => go({ name: 'workout', id: open.id })}>Resume workout</button>
         <button class="btn btn-ghost btn-danger-text" onClick=${discard}>Discard this workout</button>
-      </section>` : html`<section class="card card-pad" style="padding: 20px; gap: 14px">
+      </section>` : html`<section class="card card-pad" style="padding: 18px 20px; gap: 12px">
         <span class="section-label" style="margin: 0">Today</span>
         <div>
           <h2 style="font-size: 40px; font-weight: 700; line-height: 1">${planName(plan)}</h2>
           <p class="muted" style="margin-top: 6px">${plan ? plan.items.length + ' exercises' : 'No plan'}</p>
         </div>
-        ${preview ? html`<p class="small" style="line-height: 1.5; color: var(--text-2)">${preview}</p>` : null}
         <button class="btn btn-primary btn-big" style="min-height: 56px; font-size: 17px" onClick=${start}>Start workout</button>
         ${plans.filter((p) => p.id !== todayId).map((p) => html`<button key=${p.id} class="btn btn-ghost" onClick=${() => setOverride(p.id)}>Do ${planName(p)} instead</button>`)}
         ${last ? html`<button class="last-line" aria-label=${'Last workout: ' + planName(lastPlan) + ', ' + fmtDate(last.startedAt, true) + ', ' + agoText(daysBetween(last.startedAt, new Date())) + '. Open its log'}
@@ -526,7 +522,7 @@ function ThisWeek({ sessions, plans }) {
   const near = closestMilestone(computeMilestones(sessions, now, volCtx()).next);
   const lifted = near && near.kind === 'lifted';
   const shown = near ? (lifted ? tText(near.value) + ' / ' + tText(near.at) : Math.min(near.value, near.at) + ' / ' + near.at) : '';
-  const left = near ? Math.max(0, near.at - near.value) : 0;
+  const nearName = near ? (near.kind === 'weeks' ? near.at + ' weeks in a row' : near.name) : '';
   const DAY_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
   return html`<section class="card card-pad" style="gap: 10px" aria-label="This week">
     <span class="section-label" style="margin: 0">This week</span>
@@ -546,12 +542,11 @@ function ThisWeek({ sessions, plans }) {
       ? html`<strong>${wk.count} ${wk.count === 1 ? 'workout' : 'workouts'}</strong>${' this week' + (wk.count >= 2 ? ' ✓' : '')}`
       : 'No workouts this week yet'}${streak ? html`${' · '}<strong>${streak} ${streak === 1 ? 'week' : 'weeks'}</strong>${' in a row with 2+'}` : null}</p>
     ${near ? html`<div class="week-next">
-      <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px">
-        <span style="font-size: 15px; font-weight: 600">Next: ${near.name} · ${near.title}</span>
-        <span class="small num" style="color: var(--text-2); white-space: nowrap">${shown}</span>
+      <span class="week-next-title">Next: ${nearName} · ${near.title}</span>
+      <div class="week-next-bar">
+        <div class="ms-bar"><div style=${'width:' + Math.round(near.progress * 100) + '%'}></div></div>
+        <span class="small num">${shown}</span>
       </div>
-      <div class="ms-bar"><div style=${'width:' + Math.round(near.progress * 100) + '%'}></div></div>
-      <span class="tiny muted">${lifted ? tText(left) : left} to go</span>
     </div>` : null}
   </section>`;
 }
