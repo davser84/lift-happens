@@ -11,7 +11,13 @@ export const DEFAULT_SETTINGS = {
   showQuote: true,
   dailyQuote: null,
   lastBackup: null,
-  backupSnoozeUntil: null
+  backupSnoozeUntil: null,
+  // Body weight: the current value, plus the first one ever entered (used for workouts logged before it).
+  bodyWeight: null,
+  bodyWeightFirst: null,
+  bodyWeightFirstDay: null,
+  // 1.9.0: how each exercise logs its weight was set up once, by name (see setUpLoads).
+  loadsSetUp: false
 };
 
 export function uid() {
@@ -33,7 +39,7 @@ export function fmtWeight(v) {
 
 export function parseNum(text) {
   if (text === null || text === undefined) return NaN;
-  const t = String(text).trim().replace(',', '.');
+  const t = String(text).trim().replace(',', '.').replace(/[\u2212\u2013]/g, '-');
   if (t === '') return NaN;
   return Number(t);
 }
@@ -57,9 +63,80 @@ export function increase(equipment, w, s) {
   return round2(base + stepUp(equipment, base, s));
 }
 
-export function decrease(equipment, w, s) {
+// Below 0 only where it means something: assisted body-weight exercises (counterweight).
+export function decrease(equipment, w, s, allowNegative = false) {
   const base = w === null || w === undefined ? 0 : w;
-  return Math.max(0, round2(base - stepDown(equipment, base, s)));
+  const v = round2(base - stepDown(equipment, base <= 0 ? -base : base, s));
+  return allowNegative ? v : Math.max(0, v);
+}
+
+// ---------- how an exercise logs its weight ----------
+
+// total: the weight set (machines, cables) · each: one dumbbell of a pair (counted × 2)
+// plates: the plates on one side (counted × 2, plus the bar) · bodyweight: kg added on body weight (negative = assisted)
+export const LOADS = ['total', 'each', 'plates', 'bodyweight'];
+export const BARS = [{ label: 'Barbell', kg: 20 }, { label: 'EZ', kg: 10 }, { label: 'Smith', kg: 13.6 }];
+export function loadOf(ex) {
+  if (ex && LOADS.includes(ex.load)) return ex.load;
+  return ex && ex.equipment === 'dumbbell' ? 'each' : 'total';
+}
+export const barOf = (ex) => (ex && typeof ex.bar === 'number' && ex.bar >= 0 ? ex.bar : 20);
+
+// The weight actually moved by one rep, for volume, total lifted and milestones only.
+export function realLoad(w, ex, bodyWeight) {
+  const v = w === null || w === undefined || Number.isNaN(Number(w)) ? 0 : Number(w);
+  const kind = loadOf(ex);
+  if (kind === 'each') return Math.max(0, v * 2);
+  if (kind === 'plates') return Math.max(0, v * 2 + barOf(ex));
+  if (kind === 'bodyweight') return Math.max(0, (bodyWeight || 0) + v);
+  return Math.max(0, v);
+}
+export const entryVolume = (e, ex, bodyWeight) => (e.sets || []).reduce((a, x) => a + realLoad(x.weight, ex, bodyWeight) * (x.reps || 0), 0);
+
+const MINUS = '\u2212';
+// A weight as typed in the field: −10 for assisted, 2.5, 0.
+export const signedNum = (v) => (Number(v) < 0 ? MINUS + fmtNum(-v) : fmtNum(v));
+// A weight in words, following how the exercise is logged: "BW −10 kg", "BW +2.5 kg", "12.5 kg".
+export function fmtLoad(v, ex) {
+  if (v === null || v === undefined || v === '' || Number.isNaN(Number(v))) return '—';
+  const n = Number(v);
+  if (loadOf(ex) === 'bodyweight') return n === 0 ? 'BW' : 'BW ' + (n > 0 ? '+' : MINUS) + fmtNum(Math.abs(n)) + ' kg';
+  return fmtWeight(n);
+}
+// Short description of how an exercise logs its weight, for lists.
+export function loadLabel(ex) {
+  const kind = loadOf(ex);
+  if (kind === 'each') return 'Each dumbbell × 2';
+  if (kind === 'plates') return 'Plates per side + ' + fmtNum(barOf(ex)) + ' kg bar';
+  if (kind === 'bodyweight') return 'Body weight + added';
+  return 'Total weight';
+}
+
+// 1.9.0, once: how the existing exercises log their weight (by id, else by name). Exercises that
+// already have a load type are left alone. "Barbell Curl" is an EZ bar: renamed. Adds Smith Machine Squat.
+const LOAD_SETUP = [
+  { ids: ['squat', 'deadlift', 'incline_bench'], names: ['squat', 'deadlift', 'incline bench press', 'decline bench press', 'bench press'], load: 'plates', bar: 20 },
+  { ids: ['ez_preacher_curl', 'ez_tri_ext', 'barbell_curl'], names: ['ez-bar preacher curl', 'lying ez-bar triceps extension', 'barbell curl', 'ez-bar curl'], load: 'plates', bar: 10 },
+  { ids: ['db_curl', 'db_preacher_curl', 'db_shrugs', 'lat_raise', 'db_tri_ext'], names: ['dumbbell biceps curl', 'dumbbell preacher curl', 'dumbbell shrugs', 'lateral raises', 'lying dumbbell triceps extension'], load: 'each' },
+  { ids: ['dips', 'pullups'], names: ['dips', 'pull-ups', 'pull ups', 'pullups'], load: 'bodyweight' }
+];
+export function setUpLoads(exercises) {
+  const norm = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const changed = [];
+  const names = new Set(exercises.map((e) => norm(e.name)));
+  for (const ex of exercises) {
+    if (LOADS.includes(ex.load)) continue;
+    const rule = LOAD_SETUP.find((r) => r.ids.includes(ex.id)) || LOAD_SETUP.find((r) => r.names.includes(norm(ex.name)));
+    const next = { ...ex, load: rule ? rule.load : 'total' };
+    if (rule && rule.bar !== undefined) next.bar = rule.bar;
+    if (norm(ex.name) === 'barbell curl' && !names.has('ez-bar curl')) next.name = 'EZ-Bar Curl';
+    changed.push(next);
+  }
+  const added = [];
+  if (!names.has('smith machine squat') && !exercises.some((e) => e.id === 'smith_squat')) {
+    added.push({ id: 'smith_squat', name: 'Smith Machine Squat', equipment: 'machine', setup: '', notes: '', archived: false, startWeight: null, noSuggest: false, load: 'plates', bar: 13.6 });
+  }
+  return { changed, added };
 }
 
 // ---------- history ----------
@@ -190,7 +267,7 @@ export function plannedPlanId(plans, settings) {
 // Each exercise is compared with the last time it was done, in any workout.
 // Total volume is compared with the previous workout of the same type (A with A, B with B),
 // counting only exercises done both times; the first workout of a type uses the plan's weights.
-export function sessionSummary(session, sessions, exercisesById, plan = null) {
+export function sessionSummary(session, sessions, exercisesById, plan = null, opts0 = {}) {
   const before = ts(session.startedAt);
   const opts = { excludeSessionId: session.id, before };
   let volLast = 0, volToday = 0, heavier = 0, lighter = 0, same = 0, records = 0;
@@ -234,6 +311,8 @@ export function sessionSummary(session, sessions, exercisesById, plan = null) {
     if (record) records++;
     rows.push({
       entryId: e.id,
+      exerciseId: e.exerciseId,
+      load: loadOf(ex),
       name: ex ? ex.name : 'Exercise',
       kind: e.kind,
       vsPlan,
@@ -247,21 +326,22 @@ export function sessionSummary(session, sessions, exercisesById, plan = null) {
     });
   }
   const done = session.entries.filter((e) => e.status === 'done');
-  const volOf = (e) => (e.sets || []).reduce((a, x) => a + (x.weight || 0) * (x.reps || 0), 0);
+  const bwOf = (s) => s.bodyWeight ?? opts0.bodyWeight ?? null;
+  const volOf = (e, s) => entryVolume(e, exercisesById[e.exerciseId], bwOf(s));
   const prevSame = previousSameType(session, sessions);
   let volBase = null;
   if (prevSame) {
     const prevBy = {}, hereBy = {};
-    for (const e of prevSame.entries || []) if (e.status === 'done' && e.sets && e.sets.length) prevBy[e.exerciseId] = (prevBy[e.exerciseId] || 0) + volOf(e);
-    for (const e of done) hereBy[e.exerciseId] = (hereBy[e.exerciseId] || 0) + volOf(e);
+    for (const e of prevSame.entries || []) if (e.status === 'done' && e.sets && e.sets.length) prevBy[e.exerciseId] = (prevBy[e.exerciseId] || 0) + volOf(e, prevSame);
+    for (const e of done) hereBy[e.exerciseId] = (hereBy[e.exerciseId] || 0) + volOf(e, session);
     for (const k of Object.keys(hereBy)) if (k in prevBy) { volLast += prevBy[k]; volToday += hereBy[k]; }
     volBase = 'previous';
   } else if (plan) {
     for (const e of done) {
       const item = e.kind === 'planned' ? plan.items.find((it) => it.id === e.planItemId) : null;
       if (!item || item.weight === null || item.weight === undefined) continue;
-      volLast += item.weight * item.reps * item.sets;
-      volToday += volOf(e);
+      volLast += realLoad(item.weight, exercisesById[e.exerciseId], bwOf(session)) * item.reps * item.sets;
+      volToday += volOf(e, session);
     }
     if (volLast > 0) volBase = 'plan';
   }
@@ -365,8 +445,13 @@ export function weeksInARow(sessions, now = new Date()) {
   while ((per[k] || 0) >= 2) { n++; k = prevWeekKey(k); }
   return n;
 }
-export const sessionVolume = (s) => (s.entries || []).filter((e) => e.status === 'done')
-  .reduce((a, e) => a + (e.sets || []).reduce((b, x) => b + (x.weight || 0) * (x.reps || 0), 0), 0);
+// Total volume of a workout with the real load: both dumbbells, bar and plates on both sides,
+// body weight (the workout's own, else ctx.bodyWeight). ctx.exercises: exercises by id.
+export function sessionVolume(s, ctx = {}) {
+  const byId = ctx.exercises || {};
+  const bw = s.bodyWeight ?? ctx.bodyWeight ?? null;
+  return (s.entries || []).filter((e) => e.status === 'done').reduce((a, e) => a + entryVolume(e, byId[e.exerciseId], bw), 0);
+}
 
 // ---------- milestones ----------
 
@@ -430,7 +515,7 @@ function step(kind, n) {
 
 // Walks the finished workouts in order and returns the totals, every milestone reached (with the
 // workout that reached it) and the next one of each kind.
-export function computeMilestones(sessions, now = new Date()) {
+export function computeMilestones(sessions, now = new Date(), ctx = {}) {
   const done = sessions.filter((s) => s.finishedAt).sort((a, b) => ts(a.startedAt) - ts(b.startedAt));
   const value = { workouts: 0, lifted: 0, weeks: 0, records: 0 };
   const idx = { workouts: 0, lifted: 0, weeks: 0, records: 0 };
@@ -446,14 +531,14 @@ export function computeMilestones(sessions, now = new Date()) {
   };
   for (const s of done) {
     value.workouts++;
-    value.lifted += sessionVolume(s);
+    value.lifted += sessionVolume(s, ctx);
     for (const e of s.entries || []) {
       if (e.status !== 'done' || !e.sets || !e.sets.length) continue;
       const top = Math.max.apply(null, e.sets.map((x) => x.weight || 0));
       const reps = e.sets.reduce((a, x) => a + (x.reps || 0), 0);
       const b = best[e.exerciseId];
       if (b) {
-        if (top > 0 ? top > b.top : b.top === 0 && reps > b.reps) value.records++;
+        if (top === 0 && b.top === 0 ? reps > b.reps : top > b.top) value.records++;
         b.top = Math.max(b.top, top); b.reps = Math.max(b.reps, reps);
       } else best[e.exerciseId] = { top, reps };
     }
@@ -510,7 +595,7 @@ export function liftedComparison(kg, dayKey) {
 
 export function personalRecord(history) {
   if (!history.length) return null;
-  const anyWeight = history.some((h) => h.top > 0);
+  const anyWeight = history.some((h) => h.top !== 0);
   if (anyWeight) {
     let best = history[0];
     for (const h of history) if (h.top > best.top) best = h;
@@ -528,14 +613,66 @@ export function schemeText(sets) {
   return sets.length + ' × ' + (same ? reps[0] : reps.join('/'));
 }
 
-export function setsText(sets) {
-  return sets.map((x) => (x.weight ? fmtNum(x.weight) : 'BW') + ' × ' + x.reps).join(' · ');
+export function setsText(sets, ex) {
+  const bw = loadOf(ex) === 'bodyweight';
+  const w = (v) => (!v ? 'BW' : bw ? 'BW ' + (v > 0 ? '+' : MINUS) + fmtNum(Math.abs(v)) : fmtNum(v));
+  return sets.map((x) => w(x.weight) + ' × ' + x.reps).join(' · ');
 }
+
+// ---------- your session: duration, heart rate, mood ----------
+
+export const MOODS = ['😫', '😐', '🙂', '💪', '🔥'];
+// "62 min · ♥ 132 · 💪" (only what was filled in).
+export function sessionDataText(s) {
+  const parts = [];
+  if (s.duration) parts.push(s.duration + ' min');
+  if (s.heartRate) parts.push('♥ ' + s.heartRate);
+  if (s.mood >= 1 && s.mood <= MOODS.length) parts.push(MOODS[s.mood - 1]);
+  return parts.join(' · ');
+}
+
+// ---------- Today: this week and the closest milestone ----------
+
+// Monday to Sunday of the current week: day key and the workout started that day (if any).
+export function thisWeek(sessions, now = new Date()) {
+  const back = (now.getDay() + 6) % 7;
+  const byDay = {};
+  for (const s of sessions) if (s.finishedAt) { const k = localDayKey(new Date(s.startedAt)); if (!byDay[k]) byDay[k] = s; }
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back + i);
+    const key = localDayKey(d);
+    days.push({ key, date: d.getDate(), session: byDay[key] || null });
+  }
+  const count = sessions.filter((s) => s.finishedAt && weekKey(s.startedAt) === weekKey(now)).length;
+  return { days, count, todayKey: localDayKey(now) };
+}
+// The next milestone closest to being reached (highest share done).
+export function closestMilestone(next) {
+  let best = null;
+  for (const n of next) if (!best || n.progress > best.progress) best = n;
+  return best;
+}
+// Whole days between two dates, by the calendar.
+export function daysBetween(a, b) {
+  const da = new Date(a), db = new Date(b);
+  const ua = Date.UTC(da.getFullYear(), da.getMonth(), da.getDate()), ub = Date.UTC(db.getFullYear(), db.getMonth(), db.getDate());
+  return Math.round((ub - ua) / 86400000);
+}
+export const agoText = (days) => (days <= 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago');
 
 // ---------- import / export ----------
 
 const numOrNull = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 const normName = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// The load type of an exercise in a file, when it has one.
+function loadFields(e) {
+  if (!LOADS.includes(e.load)) return {};
+  const out = { load: e.load };
+  if (e.load === 'plates') out.bar = numOrNull(e.bar) ?? 20;
+  return out;
+}
 
 // A file with only exercises: added to the catalog, nothing else changes.
 // Exercises whose name (or id) is already in the catalog are skipped.
@@ -551,7 +688,7 @@ export function mergeExercisesFile(data, existing) {
     const ex = {
       id: e.id || uid(), name, equipment: e.equipment === 'dumbbell' ? 'dumbbell' : 'machine',
       setup: e.setup || '', notes: e.notes || '', archived: false, startWeight: numOrNull(e.startWeight),
-      noSuggest: !!e.noSuggest
+      noSuggest: !!e.noSuggest, ...loadFields(e)
     };
     names.add(normName(name)); ids.add(ex.id);
     added.push(ex);
@@ -572,7 +709,7 @@ export function validateImport(data) {
     exercises: data.exercises.map((e) => ({
       id: e.id, name: String(e.name), equipment: e.equipment === 'dumbbell' ? 'dumbbell' : 'machine',
       setup: e.setup || '', notes: e.notes || '', archived: !!e.archived,
-      startWeight: numOrNull(e.startWeight), noSuggest: !!e.noSuggest
+      startWeight: numOrNull(e.startWeight), noSuggest: !!e.noSuggest, ...loadFields(e)
     })),
     plans: data.plans.map((p, i) => ({
       id: p.id, name: String(p.name), order: typeof p.order === 'number' ? p.order : i, archived: !!p.archived,

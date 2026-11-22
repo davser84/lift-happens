@@ -6,12 +6,13 @@ import {
   plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
   validateImport, buildExport, pickDailyQuote, localDayKey,
   pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange,
-  suggestIncrease, backupDue, daysSinceBackup, weeksInARow, computeMilestones, liftedComparison, sessionVolume
+  suggestIncrease, backupDue, daysSinceBackup, weeksInARow, computeMilestones, liftedComparison, sessionVolume,
+  loadOf, barOf, BARS, fmtLoad, signedNum, loadLabel, setUpLoads, MOODS, sessionDataText, thisWeek, closestMilestone, daysBetween, agoText
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -118,6 +119,34 @@ function ensureDailyQuote() {
 
 const getSession = (id) => state.sessions.find((s) => s.id === id);
 const exMap = () => Object.fromEntries(state.exercises.map((e) => [e.id, e]));
+// What volume, total lifted and milestones need for the real load: the exercises and, for workouts
+// without their own body weight, the first body weight ever entered.
+const volCtx = () => ({ exercises: exMap(), bodyWeight: state.settings.bodyWeightFirst ?? state.settings.bodyWeight ?? null });
+
+// Body weight from Settings: workouts started today keep the day's value; the first value ever
+// entered (or corrected the same day) counts for older workouts.
+function setBodyWeight(v) {
+  const s = state.settings;
+  const today = localDayKey();
+  const first = s.bodyWeightFirst === null || s.bodyWeightFirstDay === today;
+  saveSettings({ bodyWeight: v, ...(first ? { bodyWeightFirst: v, bodyWeightFirstDay: v === null ? null : today } : {}) });
+  for (const x of state.sessions) {
+    if (localDayKey(new Date(x.startedAt)) === today && x.bodyWeight !== v) saveSession({ ...x, bodyWeight: v });
+  }
+}
+
+// 1.9.0, once: how each exercise logs its weight (bar, both dumbbells, body weight).
+async function setUpLoadsOnce(exercises, settings) {
+  if (settings.loadsSetUp) return { exercises, settings };
+  const { changed, added } = setUpLoads(exercises);
+  const list = exercises.map((e) => changed.find((c) => c.id === e.id) || e).concat(added);
+  const next = { ...settings, loadsSetUp: true };
+  try {
+    if (changed.length || added.length) await db.putMany('exercises', [...changed, ...added]);
+    await db.saveSettings(next);
+  } catch (err) { console.warn('Could not save the load types', err); }
+  return { exercises: list, settings: next };
+}
 
 // ======================================================================
 // Small helpers and shared pieces
@@ -171,6 +200,8 @@ const P = {
   up: 'M12 19V5M6 11l6-6 6 6',
   down: 'M12 5v14M6 13l6 6 6-6',
   chevron: 'M6 9l6 6 6-6',
+  clock: 'M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16M12 8v4l3 2',
+  heart: 'M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z',
   bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   next: 'M9 6l6 6-6 6',
@@ -234,7 +265,7 @@ function ExercisePicker({ title, sub, exclude, onPick, onClose, showLast }) {
   const create = () => {
     const n = name.trim();
     if (!n) return;
-    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false };
+    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, load: 'total' };
     saveExercise(ex);
     onPick(ex.id);
   };
@@ -259,7 +290,8 @@ function lastWeightText(exId) {
     return ex && ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtWeight(ex.startWeight) : '';
   }
   const last = h[h.length - 1];
-  return last.top === 0 ? 'bodyweight' : 'last ' + fmtNum(last.top) + ' kg';
+  const ex = state.exercises.find((e) => e.id === exId);
+  return last.top === 0 ? 'bodyweight' : 'last ' + fmtLoad(last.top, ex);
 }
 
 function useWakeLock(enabled) {
@@ -310,7 +342,8 @@ async function importFile(file) {
     const hasData = state.plans.length || state.sessions.length;
     if (hasData && !window.confirm('Replace all plans and history on this iPhone with this file?')) return;
     await db.replaceAll(data);
-    setState({ exercises: data.exercises, plans: data.plans, sessions: data.sessions, settings: data.settings, route: { name: 'home' } });
+    const set = await setUpLoadsOnce(data.exercises, data.settings);
+    setState({ exercises: set.exercises, plans: data.plans, sessions: data.sessions, settings: set.settings, route: { name: 'home' } });
     ensureDailyQuote();
     toast('Imported ' + data.exercises.length + ' exercises, ' + data.plans.length + ' plans, ' + data.sessions.length + ' workouts.');
   } catch (err) {
@@ -414,12 +447,11 @@ function Home() {
   const finished = d.sessions.filter((s) => s.finishedAt).sort((a, b) => Date.parse(b.finishedAt) - Date.parse(a.finishedAt));
   const last = finished[0];
   const lastPlan = last ? d.plans.find((p) => p.id === last.planId) : null;
-  const afterToday = plan ? plans.find((p) => p.id === nextPlanAfter(d.plans, plan.id)) : null;
 
   const start = () => {
     if (!plan) return;
     if (!plan.items.length) { toast('This plan has no exercises yet. Add some in Plans.'); return; }
-    const s = createSession(plan, d.sessions, new Date(), exMap());
+    const s = { ...createSession(plan, d.sessions, new Date(), exMap()), bodyWeight: d.settings.bodyWeight ?? null };
     saveSession(s);
     go({ name: 'workout', id: s.id });
   };
@@ -474,28 +506,54 @@ function Home() {
         ${preview ? html`<p class="small" style="line-height: 1.5; color: var(--text-2)">${preview}</p>` : null}
         <button class="btn btn-primary btn-big" style="min-height: 56px; font-size: 17px" onClick=${start}>Start workout</button>
         ${plans.filter((p) => p.id !== todayId).map((p) => html`<button key=${p.id} class="btn btn-ghost" onClick=${() => setOverride(p.id)}>Do ${planName(p)} instead</button>`)}
+        ${last ? html`<button class="last-line" aria-label=${'Last workout: ' + planName(lastPlan) + ', ' + fmtDate(last.startedAt, true) + ', ' + agoText(daysBetween(last.startedAt, new Date())) + '. Open its log'}
+          onClick=${() => go({ name: 'session', id: last.id, from: 'home' })}>
+          <span class="last-line-text">Last workout: ${planName(lastPlan)} · ${fmtDate(last.startedAt)} · ${agoText(daysBetween(last.startedAt, new Date()))}</span>
+          <${Icon} name="next" size=${14} sw=${2.4} />
+        </button>` : null}
       </section>`}
-      <section style="display: flex; flex-direction: column; gap: 8px">
-        <span class="section-label">Rotation</span>
-        <div style="display: flex; gap: 8px">
-          ${last ? html`<button class="card card-pad tile-link" style="flex: 1; padding: 14px; gap: 4px; text-align: left" aria-label=${'Last workout: ' + planName(lastPlan) + ', ' + fmtDate(last.finishedAt, true) + '. Open its log'}
-              onClick=${() => go({ name: 'session', id: last.id, from: 'home' })}>
-              <span class="small muted" style="display: flex; justify-content: space-between; align-items: center; width: 100%">Last workout <${Icon} name="next" size=${16} /></span>
-              <span style="font-size: 17px; font-weight: 600">${planName(lastPlan)}</span>
-              <span class="tiny muted">${fmtDate(last.finishedAt, true)}</span>
-            </button>` : html`<div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
-              <span class="small muted">Last workout</span>
-              <span style="font-size: 17px; font-weight: 600">—</span>
-            </div>`}
-          <div class="card card-pad" style="flex: 1; padding: 14px; gap: 4px">
-            <span class="small muted">After this one</span>
-            <span style="font-size: 17px; font-weight: 600">${afterToday ? planName(afterToday) : '—'}</span>
-          </div>
-        </div>
-      </section>
+      <${ThisWeek} sessions=${d.sessions} plans=${d.plans} />
     </div>
     <${Nav} active="home" />
   </div>`;
+}
+
+// This week on Today: Monday to Sunday coloured by workout, weeks in a row, the closest milestone.
+function ThisWeek({ sessions, plans }) {
+  const now = new Date();
+  const wk = thisWeek(sessions, now);
+  const streak = weeksInARow(sessions, now);
+  const near = closestMilestone(computeMilestones(sessions, now, volCtx()).next);
+  const lifted = near && near.kind === 'lifted';
+  const shown = near ? (lifted ? tText(near.value) + ' / ' + tText(near.at) : Math.min(near.value, near.at) + ' / ' + near.at) : '';
+  const left = near ? Math.max(0, near.at - near.value) : 0;
+  const DAY_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  return html`<section class="card card-pad" style="gap: 10px" aria-label="This week">
+    <span class="section-label" style="margin: 0">This week</span>
+    <div class="week-strip">
+      ${wk.days.map((day, i) => {
+        const s = day.session;
+        const plan = s ? plans.find((p) => p.id === s.planId) : null;
+        return html`<div key=${day.key} class="week-day">
+          <span class="cal-head">${DAY_LETTERS[i]}</span>
+          ${s ? html`<button class="cal-day cal-done week-dot" style=${'background:' + planColor(plans, s.planId)}
+              aria-label=${DAYS[(i + 1) % 7] + ' ' + day.date + ', ' + planName(plan) + '. Open its log'} onClick=${() => go({ name: 'session', id: s.id, from: 'home' })}>${day.date}</button>`
+            : html`<span class=${'cal-day week-dot' + (day.key === wk.todayKey ? ' cal-today' : '') + (day.key > wk.todayKey ? ' cal-future' : '')}>${day.date}</span>`}
+        </div>`;
+      })}
+    </div>
+    <p class="small" style="line-height: 1.45">${wk.count
+      ? html`<strong>${wk.count} ${wk.count === 1 ? 'workout' : 'workouts'}</strong>${' this week' + (wk.count >= 2 ? ' ✓' : '')}`
+      : 'No workouts this week yet'}${streak ? html`${' · '}<strong>${streak} ${streak === 1 ? 'week' : 'weeks'}</strong>${' in a row with 2+'}` : null}</p>
+    ${near ? html`<div class="week-next">
+      <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px">
+        <span style="font-size: 15px; font-weight: 600">Next: ${near.name} · ${near.title}</span>
+        <span class="small num" style="color: var(--text-2); white-space: nowrap">${shown}</span>
+      </div>
+      <div class="ms-bar"><div style=${'width:' + Math.round(near.progress * 100) + '%'}></div></div>
+      <span class="tiny muted">${lifted ? tText(left) : left} to go</span>
+    </div>` : null}
+  </section>`;
 }
 
 // ======================================================================
@@ -523,6 +581,8 @@ function Workout({ id }) {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [drag, setDrag] = useState(null);
   const [planAsk, setPlanAsk] = useState(null);
+  // The last exercise was confirmed while "Update Workout A?" is asked: finish once it is answered.
+  const finishAfterAsk = useRef(false);
   const dragRef = useRef(null);
   const suppressClick = useRef(false);
   const mainRef = useRef(null);
@@ -592,8 +652,15 @@ function Workout({ id }) {
     const ch = schemeChange(e, item);
     if (ch && e.planAsked !== schemeLabel(ch.to)) {
       setPlanAsk({ entryId: eid, itemId: item.id, name: (exById[e.exerciseId] || {}).name || 'Exercise', planLabel: planName(curPlan), ...ch });
+      if (!editing && allHandled()) finishAfterAsk.current = true;
+      return;
     }
+    autoFinish();
   };
+
+  // Nothing left to do: the workout finishes by itself (not while editing a finished one).
+  const allHandled = () => { const cur = getSession(id); return !!cur && cur.entries.every((x) => x.status !== 'open'); };
+  const autoFinish = () => { if (!editing && allHandled()) finalize(false, true); };
 
   const answerPlan = (update) => {
     const a = planAsk;
@@ -601,11 +668,12 @@ function Workout({ id }) {
     if (!a) return;
     const label = schemeLabel(a.to);
     patchEntry(a.entryId, (x) => (update ? { ...x, plannedSets: a.to.sets, appliedScheme: label, planAsked: label } : { ...x, planAsked: label }));
-    if (!update) return;
-    const cur = state.plans.find((p) => p.id === getSession(id).planId);
-    if (!cur) return;
-    savePlan({ ...cur, items: cur.items.map((it) => (it.id === a.itemId ? { ...it, sets: a.to.sets, reps: a.to.reps } : it)) });
-    toast(planName(cur) + ' updated: ' + a.name + ' is now ' + label + '.');
+    const cur = update ? state.plans.find((p) => p.id === getSession(id).planId) : null;
+    if (cur) {
+      savePlan({ ...cur, items: cur.items.map((it) => (it.id === a.itemId ? { ...it, sets: a.to.sets, reps: a.to.reps } : it)) });
+      toast(planName(cur) + ' updated: ' + a.name + ' is now ' + label + '.');
+    }
+    if (finishAfterAsk.current) { finishAfterAsk.current = false; autoFinish(); }
   };
 
   const skip = (e) => {
@@ -613,6 +681,7 @@ function Workout({ id }) {
     if (e.kind === 'added') {
       patchEntries((list) => list.filter((x) => x.id !== e.id));
       setOpenId(null);
+      autoFinish();
       return;
     }
     if (e.status === 'skipped') { patchEntry(e.id, (x) => ({ ...x, status: 'open' })); return; }
@@ -623,6 +692,7 @@ function Workout({ id }) {
       return next;
     });
     setOpenId(settings.autoAdvance ? after : null);
+    autoFinish();
   };
 
   const planItemOf = (e) => (plan ? plan.items.find((it) => it.id === e.planItemId) : null);
@@ -688,11 +758,15 @@ function Workout({ id }) {
     if (!ed) return;
     setEdit(null);
     const v = parseNum(ed.draft);
-    if (Number.isNaN(v) || v < 0) return;
+    if (Number.isNaN(v)) return;
+    // Below 0 only for body-weight exercises (assisted, with a counterweight).
+    const en = latestEntry(ed.entryId);
+    const neg = ed.f === 'w' && en && loadOf(state.exercises.find((x) => x.id === en.exerciseId)) === 'bodyweight';
+    if (v < 0 && !neg) return;
     patchSet(ed.entryId, ed.i, ed.f === 'w' ? { weight: round2(v) } : { reps: Math.round(v) });
   };
 
-  const finalize = (skipOpen) => {
+  const finalize = (skipOpen, auto = false) => {
     const cur = getSession(id);
     const entriesNext = cur.entries.map((e) => (skipOpen && e.status === 'open' ? { ...e, status: 'skipped' } : e));
     if (editing) {
@@ -706,7 +780,7 @@ function Workout({ id }) {
     const next = nextPlanAfter(state.plans, cur.planId);
     if (next) saveSettings({ nextPlanId: next });
     setConfirmFinish(false);
-    go({ name: 'summary', id });
+    go({ name: 'summary', id, auto });
   };
   const finish = () => {
     clearEdit();
@@ -815,7 +889,10 @@ function Workout({ id }) {
     const known = ws.filter((w) => w !== null && w !== undefined);
     const lo = known.length ? Math.min.apply(null, known) : null;
     const hi = known.length ? Math.max.apply(null, known) : null;
-    const wTxt = known.length < ws.length ? 'weight to enter' : hi === 0 ? 'bodyweight' : lo === hi ? fmtNum(lo) + ' kg' : fmtNum(lo) + '–' + fmtNum(hi) + ' kg';
+    const bwLoad = loadOf(ex) === 'bodyweight';
+    const wTxt = known.length < ws.length ? 'weight to enter'
+      : bwLoad ? (lo === hi ? fmtLoad(lo, ex) : 'BW ' + signedNum(lo) + ' to ' + signedNum(hi) + ' kg')
+      : hi === 0 ? 'bodyweight' : lo === hi ? fmtNum(lo) + ' kg' : fmtNum(lo) + '–' + fmtNum(hi) + ' kg';
     const reps = e.sets.map((x) => x.reps);
     const rTxt = reps.every((r) => r === reps[0]) ? reps[0] : reps.join('/');
     const tags = [];
@@ -868,7 +945,7 @@ function Workout({ id }) {
             ${inRem.note && inRem.note.trim() ? html`<em style="color: var(--text-2)">“${inRem.note.trim()}”</em>` : null}
             <span class="tiny muted">Cleared when you tap Done.</span>
           </div>` : null}
-          <div class="set-grid"><span></span><span class="col-label">KG</span><span class="col-label">REPS</span><span></span></div>
+          <div class="set-grid"><span></span><span class="col-label">${bwLoad ? 'KG ON BODY WEIGHT' : 'KG'}</span><span class="col-label">REPS</span><span></span></div>
           ${e.sets.map((s, i) => {
             const editW = edit && edit.entryId === e.id && edit.i === i && edit.f === 'w';
             const editR = edit && edit.entryId === e.id && edit.i === i && edit.f === 'r';
@@ -876,10 +953,10 @@ function Workout({ id }) {
             return html`<div key=${i} class="set-grid">
               <span class="set-num">${i + 1}</span>
               <div class=${'stepper' + (empty ? ' empty' : '')}>
-                <button class="icon-btn" aria-label=${'Decrease weight, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { weight: decrease(ex.equipment, latestEntry(e.id).sets[i].weight, settings) })}><${Icon} name="minus" size=${18} sw=${2.2} /></button>
+                <button class="icon-btn" aria-label=${'Decrease weight, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { weight: decrease(ex.equipment, latestEntry(e.id).sets[i].weight, settings, bwLoad) })}><${Icon} name="minus" size=${18} sw=${2.2} /></button>
                 <input class="step-field" inputmode="decimal" enterkeyhint="done" autocomplete="off" aria-label=${'Weight in kg, set ' + (i + 1)} placeholder="enter"
-                  value=${editW ? edit.draft : (empty ? '' : fmtNum(s.weight))}
-                  onFocus=${(ev) => startEdit(ev, e.id, i, 'w', empty ? '' : fmtNum(s.weight))}
+                  value=${editW ? edit.draft : (empty ? '' : signedNum(s.weight))}
+                  onFocus=${(ev) => startEdit(ev, e.id, i, 'w', empty ? '' : signedNum(s.weight))}
                   onInput=${onEditInput} onBlur=${commitEdit} onKeyDown=${onEditKey} />
                 <button class="icon-btn" aria-label=${'Increase weight, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { weight: increase(ex.equipment, latestEntry(e.id).sets[i].weight, settings) })}><${Icon} name="plus" size=${18} sw=${2.2} /></button>
               </div>
@@ -1047,12 +1124,12 @@ function SummaryCards({ sum, plan, live }) {
   let volTitle = 'Total volume vs last ' + planName(plan);
   let volText;
   if (sum.volBase === 'previous' && sum.volLast > 0) {
-    volText = 'Last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + '): ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (weight × reps, exercises done both times)';
+    volText = 'Last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + '): ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (real load × reps, exercises done both times)';
   } else if (sum.volBase === 'previous') {
     volText = 'No exercises in common with the last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + ').';
   } else if (sum.volBase === 'plan') {
     volTitle = 'Total volume vs plan';
-    volText = 'First ' + planName(plan) + ': compared with the plan’s starting weights. Plan: ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (weight × reps)';
+    volText = 'First ' + planName(plan) + ': compared with the plan’s starting weights. Plan: ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (real load × reps)';
   } else {
     volText = 'Nothing to compare yet: this is the first ' + planName(plan) + '.';
   }
@@ -1072,15 +1149,18 @@ function SummaryCards({ sum, plan, live }) {
         <div>
           ${sum.rows.length ? sum.rows.map((r) => {
             let detail, delta, bw = 0, dir = null;
-            if (r.delta === null) { detail = r.bodyweight ? r.totalReps + ' reps' : fmtNum(r.top) + ' kg · first time'; delta = 'new'; }
+            const lx = { load: r.load };
+            const wt = (v) => (r.load === 'bodyweight' ? fmtLoad(v, lx) : fmtNum(v) + ' kg');
+            const wFrom = (v) => (r.load === 'bodyweight' ? fmtLoad(v, lx).replace(/ kg$/, '') : fmtNum(v));
+            if (r.delta === null) { detail = r.bodyweight ? r.totalReps + ' reps' : wt(r.top) + ' · first time'; delta = 'new'; }
             else if (r.bodyweight) { detail = 'reps ' + r.prevReps + ' → ' + r.totalReps; delta = r.delta > 0 ? '+' + r.delta + ' reps' : r.delta < 0 ? '−' + (-r.delta) + ' reps' : 'same'; }
             else {
-              detail = (r.delta !== 0 ? fmtNum(r.prevTop) + ' → ' + fmtNum(r.top) + ' kg' : fmtNum(r.top) + ' kg') + (r.vsPlan ? ' · vs plan' : '');
+              detail = (r.delta !== 0 ? wFrom(r.prevTop) + ' → ' + wt(r.top) : wt(r.top)) + (r.vsPlan ? ' · vs plan' : '');
               delta = r.delta > 0 ? '+' + fmtNum(r.delta) + ' kg' : r.delta < 0 ? '−' + fmtNum(-r.delta) + ' kg' : 'same';
               if (r.delta !== 0 && maxAbs > 0) { bw = Math.max(4, Math.round((Math.abs(r.delta) / maxAbs) * 50)); dir = r.delta > 0 ? 'up' : 'down'; }
             }
             const rec = r.record ? (r.record.kind === 'weight'
-              ? 'New record! ' + fmtNum(r.record.value) + ' kg × ' + r.record.reps + ', set ' + (r.record.setIndex + 1) + ' of ' + r.record.setCount + ' (best was ' + fmtNum(r.record.previous) + ' kg)'
+              ? 'New record! ' + wt(r.record.value) + ' × ' + r.record.reps + ', set ' + (r.record.setIndex + 1) + ' of ' + r.record.setCount + ' (best was ' + wt(r.record.previous) + ')'
               : 'New record! ' + r.record.value + ' reps (best was ' + r.record.previous + ')') : null;
             return html`<div key=${r.entryId} class="sum-row">
               <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
@@ -1096,16 +1176,63 @@ function SummaryCards({ sum, plan, live }) {
       </section>`;
 }
 
-function Summary({ id, edited }) {
+// Your session: duration, average heart rate, mood. Optional; saved as you type, also later from the log.
+function SessionCard({ session, note }) {
+  const [dur, setDur] = useState(session.duration ? String(session.duration) : '');
+  const [hr, setHr] = useState(session.heartRate ? String(session.heartRate) : '');
+  const save = (patch) => { const cur = getSession(session.id); if (cur) saveSession({ ...cur, ...patch }); };
+  const num = (t) => { const v = parseInt(t, 10); return Number.isFinite(v) && v > 0 ? v : null; };
+  const onNum = (setter, key) => (ev) => {
+    const t = ev.target.value.replace(/[^0-9]/g, '').slice(0, 3);
+    if (t !== ev.target.value) ev.target.value = t;
+    setter(t);
+    save({ [key]: num(t) });
+  };
+  const blurOnEnter = (ev) => { if (ev.key === 'Enter') ev.target.blur(); };
+  return html`<section class="card card-pad sess-card" aria-label="Your session">
+    <span class="section-label" style="margin: 0">Your session</span>
+    <span class="tiny muted" style="line-height: 1.4">${note}</span>
+    <label class="sess-row"><span class="sess-icon"><${Icon} name="clock" /></span><span class="sess-label">Duration</span>
+      <input class="input sess-input" inputmode="numeric" enterkeyhint="done" autocomplete="off" aria-label="Duration in minutes" value=${dur} onInput=${onNum(setDur, 'duration')} onKeyDown=${blurOnEnter} />
+      <span class="sess-unit">min</span></label>
+    <label class="sess-row"><span class="sess-icon"><${Icon} name="heart" /></span><span class="sess-label">Avg heart rate</span>
+      <input class="input sess-input" inputmode="numeric" enterkeyhint="done" autocomplete="off" aria-label="Average heart rate in beats per minute" value=${hr} onInput=${onNum(setHr, 'heartRate')} onKeyDown=${blurOnEnter} />
+      <span class="sess-unit">bpm</span></label>
+    <div class="sess-row sess-mood"><span class="sess-label">Mood</span>
+      <div class="moods" role="group" aria-label="Mood">
+        ${MOODS.map((m, i) => html`<button key=${i} class=${'mood' + (session.mood === i + 1 ? ' on' : '')} aria-pressed=${session.mood === i + 1} aria-label=${'Mood ' + (i + 1) + ' of ' + MOODS.length}
+          onClick=${() => save({ mood: session.mood === i + 1 ? null : i + 1 })}>${m}</button>`)}
+      </div>
+    </div>
+  </section>`;
+}
+
+// An exercise added to a finished workout from its summary: the workout is open again (in progress).
+function addToFinished(id, exId) {
+  const cur = getSession(id);
+  if (!cur) return;
+  const exById = exMap();
+  const order = cur.entries.reduce((m, x) => Math.max(m, x.order), -1) + 1;
+  const entry = {
+    id: uid(), order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
+    status: 'open', doneAt: null, plannedSets: null, reminder: null,
+    sets: setsFromHistory(exId, 3, 8, state.sessions, { excludeSessionId: id, fallbackWeight: (exById[exId] || {}).startWeight })
+  };
+  saveSession({ ...cur, finishedAt: null, entries: [...cur.entries, entry] });
+  go({ name: 'workout', id });
+}
+
+function Summary({ id, edited, auto }) {
   const d = useStore();
   const session = d.sessions.find((s) => s.id === id);
+  const [adding, setAdding] = useState(false);
   useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
   if (!session) return null;
   const plan = d.plans.find((p) => p.id === session.planId);
   const next = d.plans.find((p) => p.id === d.settings.nextPlanId);
-  const sum = sessionSummary(session, d.sessions, exMap(), plan);
+  const sum = sessionSummary(session, d.sessions, exMap(), plan, volCtx());
   const reopen = () => go({ name: 'workout', id });
-  const reached = edited ? [] : computeMilestones(d.sessions).unlocked.filter((u) => u.sessionId === id);
+  const reached = edited ? [] : computeMilestones(d.sessions, new Date(), volCtx()).unlocked.filter((u) => u.sessionId === id);
 
   return html`<div class="screen">
     <div class="main" style="padding: calc(var(--safe-top) + var(--top-gap)) 20px calc(var(--safe-bottom) + 24px); gap: 18px">
@@ -1115,7 +1242,7 @@ function Summary({ id, edited }) {
         <div style="display: flex; flex-direction: column; gap: 2px">
           <h1 style="font-size: 24px; font-weight: 700">${planName(plan)} saved</h1>
           <span class="small muted">${sum.setsLogged} sets logged · ${sum.skipped} skipped · next up: ${planName(next)}</span>
-          <span class="small muted">Saved automatically. You can close the app.</span>
+          <span class="small muted">${auto ? 'All exercises done: saved automatically. You can close the app.' : 'Saved automatically. You can close the app.'}</span>
         </div>
       </div>
 
@@ -1128,12 +1255,19 @@ function Summary({ id, edited }) {
         </span>
       </section>`)}
 
+      <${SessionCard} key=${session.id} session=${session} note="Optional, e.g. from your watch. You can fill it in later from the log." />
+
       <${SummaryCards} sum=${sum} plan=${plan} live=${true} />
 
       ${edited ? null : html`<p class="small muted" style="line-height: 1.5">Today’s weights are the starting point next time you do these exercises, in any workout. Sets and reps still come from the plan.</p>`}
+      ${edited ? null : html`<button class="btn btn-big" onClick=${() => setAdding(true)}><${Icon} name="plus" size=${18} sw=${2.2} /> Add another exercise</button>`}
       <button class="btn btn-primary btn-big" onClick=${() => go({ name: 'home' })}><${Icon} name="home" /> Back to Home</button>
       <button class="btn btn-ghost" onClick=${reopen}>Edit this workout</button>
     </div>
+    ${adding ? html`<${ExercisePicker} title="Add an exercise" showLast=${true}
+      sub="Logged today only. The workout finishes again once it is done."
+      exclude=${new Set(session.entries.map((e) => e.exerciseId))}
+      onClose=${() => setAdding(false)} onPick=${(exId) => { setAdding(false); addToFinished(id, exId); }} />` : null}
   </div>`;
 }
 
@@ -1173,7 +1307,8 @@ function Plans() {
       const sets = Math.max(1, parseInt(it.sets, 10) || (old ? old.sets : 3));
       const reps = Math.max(1, parseInt(it.reps, 10) || (old ? old.reps : 8));
       const wNum = parseNum(it.weight);
-      const weight = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? null : round2(wNum);
+      const negOk = loadOf(draft.exercises[it.exerciseId] || exById[it.exerciseId]) === 'bodyweight';
+      const weight = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) || (wNum < 0 && !negOk) ? null : round2(wNum);
       const changed = !old || old.weight !== weight || old.exerciseId !== it.exerciseId;
       return { id: it.id, exerciseId: it.exerciseId, sets, reps, weight, weightEditedAt: changed && weight !== null ? now : (old ? old.weightEditedAt : null) };
     });
@@ -1225,7 +1360,8 @@ function Plans() {
         const ex = exOf(it.exerciseId);
         const open = openItem === it.id;
         const wNum = parseNum(it.weight);
-        const wTxt = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? '—' : fmtWeight(wNum);
+        const wTxt = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? '—' : fmtLoad(wNum, ex);
+        const negOk = loadOf(ex) === 'bodyweight';
         return html`<div key=${it.id} class=${'card' + (open ? ' ex-card open' : '')}>
           <button class="ex-head" style="min-height: 56px" aria-expanded=${open} onClick=${() => setOpenItem(open ? null : it.id)}>
             <span class="small muted num" style="width: 18px; align-self: flex-start; padding-top: 2px">${i + 1}</span>
@@ -1242,7 +1378,7 @@ function Plans() {
             <div class="grid-3">
               <label class="field">Sets<input class="input" inputmode="numeric" value=${it.sets} onInput=${(e) => editItem(it.id, { sets: e.target.value.replace(/[^0-9]/g, '') })} /></label>
               <label class="field">Reps<input class="input" inputmode="numeric" value=${it.reps} onInput=${(e) => editItem(it.id, { reps: e.target.value.replace(/[^0-9]/g, '') })} /></label>
-              <label class="field">Weight kg<input class="input" inputmode="decimal" placeholder="optional" value=${it.weight === null || it.weight === undefined ? '' : it.weight} onInput=${(e) => editItem(it.id, { weight: e.target.value.replace(/[^0-9.,]/g, '') })} /></label>
+              <label class="field">Weight kg<input class="input" inputmode=${negOk ? 'text' : 'decimal'} placeholder="optional" value=${it.weight === null || it.weight === undefined ? '' : typeof it.weight === 'number' ? signedNum(it.weight) : it.weight} onInput=${(e) => editItem(it.id, { weight: e.target.value.replace(negOk ? /[^0-9.,\-\u2212]/g : /[^0-9.,]/g, '') })} /></label>
             </div>
             <div class="field">Equipment
               <div class="seg" role="radiogroup" aria-label="Equipment">
@@ -1253,6 +1389,7 @@ function Plans() {
                 ? '+/− steps: ' + fmtNum(d.settings.stepDbSmall) + ' kg up to ' + fmtNum(d.settings.dbThreshold) + ' kg, then ' + fmtNum(d.settings.stepDbLarge) + ' kg'
                 : '+/− steps: ' + fmtNum(d.settings.stepMachine) + ' kg'}</span>
             </div>
+            <${LoadPicker} key=${ex.id} ex=${ex} onChange=${(patch) => editEx(ex.id, patch)} />
             <label class="field">Machine setup (shown with an extra tap)
               <input class="input" placeholder="e.g. seat 4, pad XL" value=${ex.setup || ''} onInput=${(e) => editEx(ex.id, { setup: e.target.value })} />
             </label>
@@ -1343,7 +1480,8 @@ function MonthCalendar({ finished, plans }) {
 
 function VolumeChart({ finished, plans }) {
   const [pick, setPick] = useState(null);
-  const pts = finished.slice(-16).map((s, i) => ({ i, s, v: sessionVolume(s) }));
+  const ctx = volCtx();
+  const pts = finished.slice(-16).map((s, i) => ({ i, s, v: sessionVolume(s, ctx) }));
   const series = activePlans(plans).slice(0, 2).map((p) => ({ plan: p, color: planColor(plans, p.id), pts: pts.filter((x) => x.s.planId === p.id) })).filter((x) => x.pts.length);
   if (pts.length < 2 || !series.length) {
     return html`<section class="card card-pad"><span style="font-size: 17px; font-weight: 700">Total volume per workout</span>
@@ -1366,7 +1504,7 @@ function VolumeChart({ finished, plans }) {
   const picked = pick !== null ? pts[pick] : null;
   const pickedPlan = picked ? plans.find((p) => p.id === picked.s.planId) : null;
   return html`<section class="card card-pad" style="gap: 8px">
-    <div style="display: flex; justify-content: space-between; align-items: baseline"><span style="font-size: 17px; font-weight: 700">Total volume per workout</span><span class="tiny muted">weight × reps</span></div>
+    <div style="display: flex; justify-content: space-between; align-items: baseline"><span style="font-size: 17px; font-weight: 700">Total volume per workout</span><span class="tiny muted">real load × reps</span></div>
     <div class="legend">${series.map((se) => html`<span key=${se.plan.id}><span class="legend-line" style=${'background:' + se.color}></span>${planName(se.plan)}</span>`)}</div>
     <p class="small" style="min-height: 20px; color: var(--text-2)">${picked
       ? html`<strong>${fmtDate(picked.s.startedAt, true)}</strong> · ${planName(pickedPlan)} · ${kgText(picked.v)}`
@@ -1386,7 +1524,7 @@ function VolumeChart({ finished, plans }) {
 }
 
 function Milestones({ sessions }) {
-  const ms = computeMilestones(sessions);
+  const ms = computeMilestones(sessions, new Date(), volCtx());
   const unlocked = ms.unlocked.slice().sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   const valueText = (n) => n.kind === 'lifted' ? tText(n.value) + ' / ' + tText(n.at) : Math.min(n.value, n.at) + ' / ' + n.at;
   return html`
@@ -1451,7 +1589,7 @@ function WorkoutHistory() {
         const tags = [];
         if (!s.finishedAt) tags.push(['In progress', '']);
         else {
-          const recs = sessionSummary(s, d.sessions, exById, plan).records;
+          const recs = sessionSummary(s, d.sessions, exById, plan, volCtx()).records;
           if (recs) tags.push([recs + (recs === 1 ? ' record' : ' records'), 'rec']);
         }
         const swaps = s.entries.filter((e) => e.kind === 'swapped' && e.status === 'done').length;
@@ -1466,7 +1604,7 @@ function WorkoutHistory() {
             <span style="font-size: 17px; font-weight: 600">${fmtDate(s.startedAt, true)} · ${hhmm(s.startedAt)}</span>
             <span class="small muted">${planName(plan)}</span>
           </span>
-          <span class="small muted">${done.length} ${done.length === 1 ? 'exercise' : 'exercises'} done</span>
+          <span class="small muted">${done.length} ${done.length === 1 ? 'exercise' : 'exercises'} done${sessionDataText(s) ? ' · ' + sessionDataText(s) : ''}</span>
           ${tags.length ? html`<span class="tags">${tags.map(([t, k]) => html`<span key=${t} class=${'tag ' + k}>${t}</span>`)}</span>` : null}
         </button>`;
       })}
@@ -1484,7 +1622,7 @@ function SessionDetail({ id, from }) {
   if (!session) return null;
   const exById = exMap();
   const plan = d.plans.find((p) => p.id === session.planId);
-  const sum = sessionSummary(session, d.sessions, exById, plan);
+  const sum = sessionSummary(session, d.sessions, exById, plan, volCtx());
   const recById = Object.fromEntries(sum.rows.filter((r) => r.record).map((r) => [r.entryId, r.record]));
   const done = doneInOrder(session);
   const skipped = session.entries.filter((e) => e.status !== 'done').sort((a, b) => a.order - b.order);
@@ -1508,12 +1646,13 @@ function SessionDetail({ id, from }) {
       <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}</span>
     </div>
     <div class="main">
+      <${SessionCard} key=${session.id} session=${session} note="Fill in when you like: it saves as you type." />
       <span class="section-label">Done, in this order · ${done.length}</span>
       ${done.length ? html`<div class="card">
         ${done.map((e, i) => {
           const tags = [];
           const rec = recById[e.id];
-          if (rec) tags.push([rec.kind === 'weight' ? 'New record ' + fmtNum(rec.value) + ' kg' : 'New record ' + rec.value + ' reps', 'rec']);
+          if (rec) tags.push([rec.kind === 'weight' ? 'New record ' + fmtLoad(rec.value, exById[e.exerciseId]) : 'New record ' + rec.value + ' reps', 'rec']);
           if (e.kind === 'swapped') tags.push(['Replaces ' + name(e.replacesExerciseId), '']);
           if (e.kind === 'added') tags.push(['Added', '']);
           if (e.plannedSets && e.sets.length !== e.plannedSets) tags.push([e.sets.length + ' of ' + e.plannedSets + ' sets', 'warn']);
@@ -1522,7 +1661,7 @@ function SessionDetail({ id, from }) {
             <span class="small muted num" style="width: 18px; flex-shrink: 0; font-weight: 600">${i + 1}</span>
             <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
               <span style="font-size: 15px; font-weight: 600">${name(e.exerciseId)}</span>
-              <span class="small num" style="color: var(--text-2)">${setsText(e.sets)}</span>
+              <span class="small num" style="color: var(--text-2)">${setsText(e.sets, exById[e.exerciseId])}</span>
               ${tags.length ? html`<span class="tags">${tags.map(([t, k]) => html`<span key=${t} class=${'tag ' + k}>${t}</span>`)}</span>` : null}
             </div>
             <${ExIcon} id=${e.exerciseId} />
@@ -1578,6 +1717,7 @@ function ExerciseProgress() {
     const bw = hist.every((h) => h.top === 0);
     const unit = bw ? ' reps' : ' kg';
     const val = (h) => (bw ? h.totalReps : h.top);
+    const fmtV = (v) => (bw ? v + ' reps' : fmtLoad(v, ex));
     const windowed = hist.slice(-10);
     const first = windowed[0], last = hist[hist.length - 1];
     const diff = round2(val(last) - val(first));
@@ -1588,7 +1728,7 @@ function ExerciseProgress() {
     const vals = pts.map(val);
     let lo = Math.min(...vals), hi = Math.max(...vals);
     const pad = bw ? 2 : 2.5;
-    lo = Math.max(0, lo - pad); hi += pad;
+    lo = lo >= 0 ? Math.max(0, lo - pad) : lo - pad; hi += pad;
     const W = 340, L = 36, R = 336, T = 12, B = 164;
     const X = (i) => (N === 1 ? (L + R) / 2 : L + 8 + (i / (N - 1)) * (R - L - 16));
     const Y = (v) => B - ((v - lo) / (hi - lo)) * (B - T);
@@ -1605,7 +1745,7 @@ function ExerciseProgress() {
       <section class="card card-pad">
         <span class="section-label" style="margin: 0">${bw ? 'Total reps, last session' : 'Top-set weight, last session'}</span>
         <div style="display: flex; align-items: baseline; gap: 10px">
-          <span class="hero-num num">${fmtNum(val(last)) + unit}</span>
+          <span class="hero-num num">${fmtV(val(last))}</span>
           <span class="num" style="font-weight: 600; color: var(--text-2)">${(diff > 0 ? '+' : diff < 0 ? '−' : '±') + fmtNum(Math.abs(diff)) + unit}</span>
         </div>
         <span class="small muted">Change over the last ${windowed.length} ${windowed.length === 1 ? 'session' : 'sessions'}, since ${fmtDate(first.session.startedAt)}</span>
@@ -1615,9 +1755,9 @@ function ExerciseProgress() {
         <span style="width: 44px; height: 44px; flex-shrink: 0; border-radius: 22px; background: rgba(91,155,255,0.14); color: var(--accent); display: flex; align-items: center; justify-content: center"><${Icon} name="trophy" size=${22} /></span>
         <div style="flex: 1; display: flex; flex-direction: column; gap: 2px">
           <span class="section-label" style="margin: 0">Personal record</span>
-          <span class="num" style="font-size: 22px; font-weight: 700">${pr.kind === 'weight' ? fmtNum(pr.value) + ' kg × ' + pr.reps : pr.value + ' reps'}</span>
+          <span class="num" style="font-size: 22px; font-weight: 700">${pr.kind === 'weight' ? fmtLoad(pr.value, ex) + ' × ' + pr.reps : pr.value + ' reps'}</span>
           <span class="small num" style="color: var(--text-2)">${pr.kind === 'weight'
-            ? 'Set ' + (pr.setIndex + 1) + ' of ' + pr.setCount + ', in a ' + schemeText(pr.item.entry.sets) + ' (' + setsText(pr.item.entry.sets) + ')'
+            ? 'Set ' + (pr.setIndex + 1) + ' of ' + pr.setCount + ', in a ' + schemeText(pr.item.entry.sets) + ' (' + setsText(pr.item.entry.sets, ex) + ')'
             : 'Most total reps in a session: ' + pr.item.entry.sets.map((x) => x.reps).join(' · ')}</span>
           <span class="small muted">First reached ${fmtDate(pr.item.session.startedAt)} · ${planName(planOf(pr.item.session))}</span>
         </div>
@@ -1635,12 +1775,12 @@ function ExerciseProgress() {
             <text x=${L} y="190" font-size="11" fill="#9DA9C0">${fmtDate(pts[0].session.startedAt)}</text>
             <text x=${R} y="190" font-size="11" fill="#9DA9C0" text-anchor="end">${fmtDate(pts[N - 1].session.startedAt)}</text>
           </svg>
-          ${pts.map((h, i) => html`<button key=${'b' + i} aria-label=${fmtDate(h.session.startedAt) + ', ' + fmtNum(vals[i]) + unit} onClick=${() => setSel(i)}
+          ${pts.map((h, i) => html`<button key=${'b' + i} aria-label=${fmtDate(h.session.startedAt) + ', ' + fmtV(vals[i])} onClick=${() => setSel(i)}
             style=${'position:absolute;top:0;height:88%;border:0;padding:0;background:transparent;left:' + pct(X(i) - colW / 2) + ';width:' + pct(colW)}></button>`)}
           <div class="tip" role="status" style=${'left:' + pct(tipLeft) + ';top:' + (tipTop / 200) * 100 + '%'}>
             <span class="tiny muted">${fmtDate(pts[s].session.startedAt) + ' · ' + planName(planOf(pts[s].session))}</span>
-            <span class="num" style="font-weight: 600">${fmtNum(vals[s]) + unit}</span>
-            <span class="tiny muted num">${setsText(pts[s].entry.sets)}</span>
+            <span class="num" style="font-weight: 600">${fmtV(vals[s])}</span>
+            <span class="tiny muted num">${setsText(pts[s].entry.sets, ex)}</span>
           </div>
         </div>
         <p class="tiny muted" style="margin: 0 4px">Tap the chart to see a session.</p>
@@ -1652,7 +1792,7 @@ function ExerciseProgress() {
           <span style="font-size: 14px; font-weight: 600">${fmtDate(h.session.startedAt, true)}</span>
           <span class="small muted">${planName(planOf(h.session))}${h.entry.kind === 'swapped' ? ' · as swap' : h.entry.kind === 'added' ? ' · added' : ''}</span>
         </div>
-        <span class="small num" style="color: var(--text-2)">${setsText(h.entry.sets)}</span>
+        <span class="small num" style="color: var(--text-2)">${setsText(h.entry.sets, ex)}</span>
       </div>`)}
       ${hist.length > 5 ? html`<button class="btn" onClick=${() => setAll(!all)}>${all ? 'Show less' : 'Show all (' + hist.length + ' sessions)'}</button>` : null}`;
   }
@@ -1683,6 +1823,49 @@ function ExerciseProgress() {
 // Settings
 // ======================================================================
 
+// How an exercise logs its weight. Only volume, total lifted and milestones use the real load.
+const LOAD_OPTIONS = [
+  ['total', 'Total', 'The weight you set: machines, cables'],
+  ['each', 'Each dumbbell', 'One dumbbell’s weight; counted × 2'],
+  ['plates', 'Plates per side + bar', 'The plates on one side; counted × 2 + the bar'],
+  ['bodyweight', 'Body weight + added', 'Kg added with a belt; negative if assisted']
+];
+function LoadPicker({ ex, onChange }) {
+  const kind = loadOf(ex);
+  const bar = barOf(ex);
+  const preset = BARS.find((b) => b.kg === bar);
+  const [other, setOther] = useState(!preset);
+  const [barText, setBarText] = useState(fmtNum(bar));
+  const commitBar = () => {
+    const v = parseNum(barText);
+    if (Number.isNaN(v) || v < 0) { setBarText(fmtNum(bar)); return; }
+    onChange({ load: 'plates', bar: round2(v) });
+  };
+  return html`<div class="field">How you log the weight
+    <div class="load-list" role="radiogroup" aria-label="How you log the weight">
+      ${LOAD_OPTIONS.map(([k, title, sub]) => html`<div key=${k} class=${'load-item' + (kind === k ? ' on' : '')}>
+        <button role="radio" aria-checked=${kind === k} class="load-opt" onClick=${() => onChange(k === 'plates' ? { load: k, bar } : { load: k })}>
+          <span class="radio-dot" aria-hidden="true"></span>
+          <span class="load-text"><span class="load-title">${title}</span><span class="tiny muted">${sub}</span></span>
+        </button>
+        ${k === 'plates' && kind === 'plates' ? html`<div class="load-bar">
+          <span class="small" style="font-weight: 600; color: var(--text-2)">Bar weight</span>
+          <div class="chips">
+            ${BARS.map((b) => html`<button key=${b.label} class=${'chip-btn' + (!other && bar === b.kg ? ' on' : '')} aria-pressed=${!other && bar === b.kg}
+              onClick=${() => { setOther(false); setBarText(fmtNum(b.kg)); onChange({ load: 'plates', bar: b.kg }); }}>${b.label} ${fmtNum(b.kg)} kg</button>`)}
+            <button class=${'chip-btn' + (other ? ' on' : '')} aria-pressed=${other} onClick=${() => setOther(true)}>Other…</button>
+          </div>
+          ${other ? html`<label class="load-other">Bar
+            <input class="input" inputmode="decimal" enterkeyhint="done" aria-label="Bar weight in kg" value=${barText}
+              onInput=${(e) => setBarText(e.target.value.replace(/[^0-9.,]/g, ''))} onBlur=${commitBar} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} /> kg</label>` : null}
+          <span class="tiny muted" style="font-weight: 400">Example: 10 kg per side → ${fmtNum(20 + bar)} kg lifted.</span>
+        </div>` : null}
+      </div>`)}
+    </div>
+    <span class="tiny muted" style="font-weight: 400; line-height: 1.4">Only volume, total lifted and milestones use the real load. Your numbers, records and suggestions stay as you log them.</span>
+  </div>`;
+}
+
 // The per-exercise switch for automatic "more weight" suggestions (on unless switched off).
 function SuggestSwitch({ ex, onChange }) {
   const on = !ex.noSuggest;
@@ -1700,7 +1883,7 @@ function SuggestSwitch({ ex, onChange }) {
 function ExerciseEditor({ ex, inPlans, hasLog }) {
   const [name, setName] = useState(ex.name);
   const [setup, setSetup] = useState(ex.setup || '');
-  const [startW, setStartW] = useState(ex.startWeight === null || ex.startWeight === undefined ? '' : fmtNum(ex.startWeight));
+  const [startW, setStartW] = useState(ex.startWeight === null || ex.startWeight === undefined ? '' : signedNum(ex.startWeight));
   const save = (patch) => saveExercise({ ...ex, ...patch });
   const commitName = () => {
     const n = name.trim();
@@ -1711,8 +1894,8 @@ function ExerciseEditor({ ex, inPlans, hasLog }) {
   };
   const commitStart = () => {
     const v = parseNum(startW);
-    const val = startW.trim() === '' || Number.isNaN(v) || v < 0 ? null : round2(v);
-    setStartW(val === null ? '' : fmtNum(val));
+    const val = startW.trim() === '' || Number.isNaN(v) || (v < 0 && loadOf(ex) !== 'bodyweight') ? null : round2(v);
+    setStartW(val === null ? '' : signedNum(val));
     if (val !== (ex.startWeight ?? null)) save({ startWeight: val });
   };
   const blurOnEnter = (e) => { if (e.key === 'Enter') e.target.blur(); };
@@ -1726,8 +1909,9 @@ function ExerciseEditor({ ex, inPlans, hasLog }) {
         <button role="radio" aria-checked=${ex.equipment === 'dumbbell'} class=${ex.equipment === 'dumbbell' ? 'on' : ''} onClick=${() => save({ equipment: 'dumbbell' })}>Dumbbells</button>
       </div>
     </div>
+    <${LoadPicker} key=${ex.id} ex=${ex} onChange=${(patch) => save(patch)} />
     <label class="field">Starting weight, kg
-      <input class="input" inputmode="decimal" placeholder="optional" value=${startW} onInput=${(e) => setStartW(e.target.value.replace(/[^0-9.,]/g, ''))} onBlur=${commitStart} onKeyDown=${blurOnEnter} />
+      <input class="input" inputmode=${loadOf(ex) === 'bodyweight' ? 'text' : 'decimal'} placeholder="optional" value=${startW} onInput=${(e) => setStartW(e.target.value.replace(loadOf(ex) === 'bodyweight' ? /[^0-9.,\-\u2212]/g : /[^0-9.,]/g, ''))} onBlur=${commitStart} onKeyDown=${blurOnEnter} />
       <span class="tiny muted" style="font-weight: 400">${hasLog ? 'Already logged: the last weight used is proposed instead.' : 'Proposed the first time you do it, until it has been logged.'}</span>
     </label>
     <label class="field">Machine setup
@@ -1754,7 +1938,7 @@ function Exercises() {
     const n = newName.trim();
     if (!n) return;
     if (d.exercises.some((e) => e.name.trim().toLowerCase() === n.toLowerCase())) { toast(n + ' is already in the catalog.'); return; }
-    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, startWeight: null };
+    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, startWeight: null, load: 'total' };
     saveExercise(ex);
     setNewName('');
     setOpenId(ex.id);
@@ -1779,14 +1963,14 @@ function Exercises() {
         const h = exerciseHistory(d.sessions, ex.id);
         const last = h.length ? h[h.length - 1] : null;
         const planW = plans.flatMap((p) => p.items).find((it) => it.exerciseId === ex.id && it.weight !== null && it.weight !== undefined);
-        const wTxt = last ? (last.top === 0 ? 'bodyweight' : 'last ' + fmtNum(last.top) + ' kg')
-          : planW ? 'plan ' + fmtWeight(planW.weight)
-          : ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtWeight(ex.startWeight) : 'no weight yet';
+        const wTxt = last ? (last.top === 0 ? 'bodyweight' : 'last ' + fmtLoad(last.top, ex))
+          : planW ? 'plan ' + fmtLoad(planW.weight, ex)
+          : ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtLoad(ex.startWeight, ex) : 'no weight yet';
         return html`<div key=${ex.id} class=${'card' + (open ? ' ex-card open' : '')}>
           <button class="ex-head" style="min-height: 60px" aria-expanded=${open} onClick=${() => setOpenId(open ? null : ex.id)}>
             <div class="ex-head-text">
               <span class="ex-name">${ex.name}</span>
-              <span class="small muted">${ex.equipment === 'dumbbell' ? 'Dumbbells' : 'Machine / barbell'} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
+              <span class="small muted">${loadLabel(ex)} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
             </div>
           </button>
           ${open ? html`<${ExerciseEditor} key=${ex.id} ex=${ex} inPlans=${ps} hasLog=${!!last} />` : null}
@@ -1814,6 +1998,20 @@ function NumberSetting({ label, value, onSave, width = 56 }) {
     onInput=${(e) => setText(e.target.value)} onBlur=${commit} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} />`;
 }
 
+// Body weight: empty clears it. Saved when you leave the field.
+function BodyWeightInput({ value }) {
+  const [text, setText] = useState(value === null || value === undefined ? '' : fmtNum(value));
+  useEffect(() => setText(value === null || value === undefined ? '' : fmtNum(value)), [value]);
+  const commit = () => {
+    const v = parseNum(text);
+    const next = text.trim() === '' ? null : Number.isNaN(v) || v <= 0 || v > 400 ? undefined : round2(v);
+    if (next === undefined) { setText(value === null || value === undefined ? '' : fmtNum(value)); return; }
+    if (next !== (value ?? null)) setBodyWeight(next);
+  };
+  return html`<input class="input" style="width: 80px; text-align: center; padding: 0 6px" inputmode="decimal" enterkeyhint="done" aria-label="Body weight in kg" placeholder="—" value=${text}
+    onInput=${(e) => setText(e.target.value.replace(/[^0-9.,]/g, ''))} onBlur=${commit} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} />`;
+}
+
 function Settings() {
   const d = useStore();
   const s = d.settings;
@@ -1827,6 +2025,15 @@ function Settings() {
   return html`<div class="screen">
     <div class="header"><h1 class="title">Settings</h1></div>
     <div class="main" style="gap: 6px">
+      <span class="section-label">You</span>
+      <div class="card card-pad" style="gap: 8px">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+          <span>Body weight</span>
+          <span style="display: flex; align-items: center; gap: 6px" class="small muted"><${BodyWeightInput} value=${s.bodyWeight} /> kg</span>
+        </div>
+        <span class="tiny muted" style="line-height: 1.4">Used for Dips and Pull-ups in volume and total lifted. Each workout keeps the value of the day it starts.</span>
+      </div>
+
       <span class="section-label">Rotation</span>
       <div class="card card-pad" style="gap: 10px">
         <span style="font-size: 15px; font-weight: 500">Next workout</span>
@@ -1903,7 +2110,7 @@ function App() {
   else {
     const r = d.route;
     if (r.name === 'workout') screen = html`<${Workout} key=${r.id} id=${r.id} />`;
-    else if (r.name === 'summary') screen = html`<${Summary} id=${r.id} edited=${!!r.edited} />`;
+    else if (r.name === 'summary') screen = html`<${Summary} id=${r.id} edited=${!!r.edited} auto=${!!r.auto} />`;
     else if (r.name === 'plans') screen = html`<${Plans} />`;
     else if (r.name === 'progress') screen = html`<${Progress} />`;
     else if (r.name === 'session') screen = html`<${SessionDetail} key=${r.id} id=${r.id} from=${r.from} />`;
@@ -1935,12 +2142,13 @@ async function boot() {
       }
     }
     const open = data.sessions.find((s) => !s.finishedAt);
+    const set = data.plans.length || data.exercises.length ? await setUpLoadsOnce(data.exercises, settings) : { exercises: data.exercises, settings };
     setState({
       loaded: true,
-      exercises: data.exercises,
+      exercises: set.exercises,
       plans: data.plans,
       sessions: data.sessions,
-      settings,
+      settings: set.settings,
       // Reopen a workout left open (e.g. after the app was closed mid-session).
       route: open ? { name: 'workout', id: open.id } : { name: 'home' }
     });

@@ -362,3 +362,149 @@ test('lifted-so-far comparison picks an object that fits at least twice', () => 
   assert.equal(liftedComparison(64800, '2026-11-20'), liftedComparison(64800, '2026-11-20'), 'same line all day');
   assert.equal(sessionVolume(doneSess('a', '2026-11-10', s3(50))), 1200);
 });
+
+// ---------- 1.9.0: real load, body weight, session data, this week ----------
+
+import {
+  loadOf, barOf, realLoad, fmtLoad, signedNum, setUpLoads, sessionDataText, thisWeek, closestMilestone, daysBetween, agoText,
+  sessionVolume as vol190, computeMilestones as ms190, sessionSummary as sum190, setsText as st190, parseNum as pn190,
+  decrease as dec190, personalRecord as pr190, exerciseHistory as eh190, validateImport as vi190, DEFAULT_SETTINGS as DS190
+} from '../js/logic.js';
+
+const EXS = {
+  squat: { id: 'squat', name: 'Squat', equipment: 'machine', load: 'plates', bar: 20 },
+  ez: { id: 'ez', name: 'EZ-Bar Curl', equipment: 'machine', load: 'plates', bar: 10 },
+  curl: { id: 'curl', name: 'Dumbbell Biceps Curl', equipment: 'dumbbell', load: 'each' },
+  dips: { id: 'dips', name: 'Dips', equipment: 'machine', load: 'bodyweight' },
+  press: { id: 'press', name: 'Leg Press', equipment: 'machine', load: 'total' }
+};
+const doneEntry = (exerciseId, sets, extra = {}) => ({ id: exerciseId + Math.random(), exerciseId, kind: 'planned', status: 'done', doneAt: null, sets, ...extra });
+
+test('real load: total, both dumbbells, plates on both sides plus the bar, body weight plus added', () => {
+  assert.equal(realLoad(80, EXS.press, 80), 80);
+  assert.equal(realLoad(16, EXS.curl, 80), 32);
+  assert.equal(realLoad(10, EXS.squat, 80), 40);
+  assert.equal(realLoad(0, EXS.squat, 80), 20);
+  assert.equal(realLoad(10, EXS.ez, 80), 30);
+  assert.equal(realLoad(2.5, EXS.dips, 80), 82.5);
+  assert.equal(realLoad(-10, EXS.dips, 80), 70);
+  assert.equal(realLoad(-10, EXS.dips, null), 0, 'no body weight yet: never below 0');
+  assert.equal(loadOf({ equipment: 'dumbbell' }), 'each');
+  assert.equal(loadOf({ equipment: 'machine' }), 'total');
+  assert.equal(loadOf(undefined), 'total');
+  assert.equal(barOf({ load: 'plates' }), 20);
+  assert.equal(barOf({ load: 'plates', bar: 13.6 }), 13.6);
+});
+
+test('weights in words follow the load type; minus sign typed or from the stepper', () => {
+  assert.equal(fmtLoad(-10, EXS.dips), 'BW −10 kg');
+  assert.equal(fmtLoad(2.5, EXS.dips), 'BW +2.5 kg');
+  assert.equal(fmtLoad(0, EXS.dips), 'BW');
+  assert.equal(fmtLoad(12.5, EXS.squat), '12.5 kg');
+  assert.equal(signedNum(-7.5), '−7.5');
+  assert.equal(signedNum(5), '5');
+  assert.equal(st190([{ weight: -10, reps: 8 }, { weight: 0, reps: 8 }, { weight: 2.5, reps: 6 }], EXS.dips), 'BW −10 × 8 · BW × 8 · BW +2.5 × 6');
+  assert.equal(st190([{ weight: 10, reps: 8 }], EXS.squat), '10 × 8');
+  assert.equal(pn190('−7,5'), -7.5);
+  assert.equal(dec190('machine', 0, DS190, true), -1.25);
+  assert.equal(dec190('machine', -10, DS190, true), -11.25);
+  assert.equal(dec190('machine', 0, DS190), 0, 'other exercises stop at 0');
+});
+
+test('session volume uses the real load and the workout’s own body weight, else the first one entered', () => {
+  const s = { id: 's', finishedAt: 'x', bodyWeight: 80, entries: [
+    doneEntry('squat', [{ weight: 10, reps: 8 }]), // 40 × 8 = 320
+    doneEntry('curl', [{ weight: 16, reps: 8 }]), // 32 × 8 = 256
+    doneEntry('dips', [{ weight: -10, reps: 8 }]), // 70 × 8 = 560
+    { ...doneEntry('press', [{ weight: 100, reps: 8 }]), status: 'skipped' }
+  ] };
+  assert.equal(vol190(s, { exercises: EXS }), 1136);
+  const old = { ...s, bodyWeight: undefined };
+  assert.equal(vol190(old, { exercises: EXS, bodyWeight: 90 }), 1136 + 80);
+  assert.equal(vol190(old, {}), 10 * 8 + 16 * 8 + 0, 'without exercises: the logged numbers, never below 0');
+});
+
+test('summary: volume with the real load; assisted dips with less counterweight are heavier and a record', () => {
+  const plan = { id: 'b', items: [{ id: 'i1', exerciseId: 'dips', sets: 1, reps: 8, weight: null }, { id: 'i2', exerciseId: 'squat', sets: 1, reps: 8, weight: null }] };
+  const prev = { id: 'p', planId: 'b', startedAt: '2026-11-16T17:00:00Z', finishedAt: '2026-11-16T18:00:00Z', bodyWeight: 80, entries: [
+    doneEntry('dips', [{ weight: -10, reps: 8 }], { planItemId: 'i1' }), doneEntry('squat', [{ weight: 10, reps: 8 }], { planItemId: 'i2' })] };
+  const now = { id: 'n', planId: 'b', startedAt: '2026-11-19T17:00:00Z', finishedAt: '2026-11-19T18:00:00Z', bodyWeight: 80, entries: [
+    doneEntry('dips', [{ weight: -7.5, reps: 8 }], { planItemId: 'i1' }), doneEntry('squat', [{ weight: 12.5, reps: 8 }], { planItemId: 'i2' })] };
+  const sum = sum190(now, [prev, now], EXS, plan);
+  assert.equal(sum.volLast, 70 * 8 + 40 * 8);
+  assert.equal(sum.volToday, 72.5 * 8 + 45 * 8);
+  const dips = sum.rows.find((r) => r.exerciseId === 'dips');
+  assert.equal(dips.load, 'bodyweight');
+  assert.equal(dips.delta, 2.5);
+  assert.equal(dips.record.kind, 'weight');
+  assert.equal(sum.heavier, 2);
+  const h = eh190([prev, now], 'dips');
+  assert.equal(pr190(h).kind, 'weight');
+  assert.equal(pr190(h).value, -7.5);
+});
+
+test('milestones: total lifted with the real load; less assistance counts as a record', () => {
+  const mk = (i, w) => ({ id: 'w' + i, planId: 'a', startedAt: '2026-11-0' + i + 'T10:00:00Z', finishedAt: '2026-11-0' + i + 'T11:00:00Z', bodyWeight: 80,
+    entries: [doneEntry('dips', [{ weight: w, reps: 10 }])] });
+  const ms = ms190([mk(1, -10), mk(2, -7.5), mk(3, -5)], new Date('2026-11-04T10:00:00Z'), { exercises: EXS });
+  assert.equal(ms.totals.lifted, 700 + 725 + 750);
+  assert.equal(ms.totals.records, 2);
+  assert.ok(ms.unlocked.some((u) => u.kind === 'lifted' && u.at === 1000));
+});
+
+test('1.9.0 setup: load types by id or name, EZ-Bar Curl renamed, Smith Machine Squat added, own choices kept', () => {
+  const list = [
+    { id: 'squat', name: 'Squat', equipment: 'machine' },
+    { id: 'incline_bench', name: 'Decline Bench Press', equipment: 'machine' },
+    { id: 'barbell_curl', name: 'Barbell Curl', equipment: 'machine' },
+    { id: 'x1', name: 'Lying EZ-Bar Triceps Extension', equipment: 'machine' },
+    { id: 'lat_raise', name: 'Lateral Raises', equipment: 'dumbbell' },
+    { id: 'x2', name: 'Pull-ups', equipment: 'machine' },
+    { id: 'shoulder_press', name: 'Shoulder Press', equipment: 'machine' },
+    { id: 'x3', name: 'Dips', equipment: 'machine', load: 'total' }
+  ];
+  const { changed, added } = setUpLoads(list);
+  const by = Object.fromEntries(changed.map((e) => [e.id, e]));
+  assert.deepEqual([by.squat.load, by.squat.bar], ['plates', 20]);
+  assert.deepEqual([by.incline_bench.load, by.incline_bench.bar], ['plates', 20]);
+  assert.deepEqual([by.barbell_curl.load, by.barbell_curl.bar, by.barbell_curl.name], ['plates', 10, 'EZ-Bar Curl']);
+  assert.deepEqual([by.x1.load, by.x1.bar], ['plates', 10]);
+  assert.equal(by.lat_raise.load, 'each');
+  assert.equal(by.x2.load, 'bodyweight');
+  assert.equal(by.shoulder_press.load, 'total');
+  assert.equal(by.x3, undefined, 'an exercise with a load type is left alone');
+  assert.equal(added.length, 1);
+  assert.deepEqual([added[0].name, added[0].load, added[0].bar], ['Smith Machine Squat', 'plates', 13.6]);
+  assert.equal(setUpLoads([...list, ...added]).added.length, 0);
+});
+
+test('backups keep the load type and the bar', () => {
+  const data = vi190({ app: 'lift-happens', exercises: [{ id: 'a', name: 'Squat', load: 'plates', bar: 13.6 }, { id: 'b', name: 'Dips', load: 'bodyweight' }, { id: 'c', name: 'X', load: 'weird' }], plans: [] });
+  assert.deepEqual([data.exercises[0].load, data.exercises[0].bar], ['plates', 13.6]);
+  assert.equal(data.exercises[1].load, 'bodyweight');
+  assert.equal(data.exercises[2].load, undefined);
+  assert.equal(data.settings.loadsSetUp, false);
+});
+
+test('session data line, this week and the closest milestone', () => {
+  assert.equal(sessionDataText({ duration: 62, heartRate: 132, mood: 4 }), '62 min · ♥ 132 · 💪');
+  assert.equal(sessionDataText({ duration: 45 }), '45 min');
+  assert.equal(sessionDataText({ mood: 5 }), '🔥');
+  assert.equal(sessionDataText({}), '');
+  const now = new Date(2026, 10, 22, 9, 0); // Sunday
+  const ss = [
+    { id: 'a', planId: 'A', startedAt: new Date(2026, 10, 17, 18).toISOString(), finishedAt: 'x' },
+    { id: 'b', planId: 'B', startedAt: new Date(2026, 10, 19, 18).toISOString(), finishedAt: 'x' },
+    { id: 'c', planId: 'A', startedAt: new Date(2026, 10, 14, 18).toISOString(), finishedAt: 'x' },
+    { id: 'd', planId: 'A', startedAt: new Date(2026, 10, 22, 8).toISOString(), finishedAt: null }
+  ];
+  const wk = thisWeek(ss, now);
+  assert.deepEqual(wk.days.map((x) => x.date), [16, 17, 18, 19, 20, 21, 22]);
+  assert.deepEqual(wk.days.map((x) => (x.session ? x.session.id : null)), [null, 'a', null, 'b', null, null, null]);
+  assert.equal(wk.count, 2);
+  assert.equal(closestMilestone([{ kind: 'workouts', progress: 0.8 }, { kind: 'lifted', progress: 0.3 }]).kind, 'workouts');
+  assert.equal(daysBetween(new Date(2026, 10, 19, 23), new Date(2026, 10, 22, 1)), 3);
+  assert.equal(agoText(0), 'today');
+  assert.equal(agoText(1), 'yesterday');
+  assert.equal(agoText(3), '3 days ago');
+});

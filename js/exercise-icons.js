@@ -54,7 +54,8 @@ export const ICON_BY_EXERCISE = {
   db_tri_ext: 'lying-dumbbell-triceps-extension', // Lying Dumbbell Triceps Extension
   db_curl: 'dumbbell-biceps-curl',               // Dumbbell Biceps Curl
   leg_curl: 'leg-curl',                          // Leg Curl
-  chest_press: 'chest-press'                     // Chest Press
+  chest_press: 'chest-press',                    // Chest Press
+  smith_squat: 'squat'                           // Smith Machine Squat (added in 1.9.0)
 };
 
 const KNOWN = new Set(ICONS);

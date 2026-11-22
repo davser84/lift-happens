@@ -262,3 +262,37 @@ h1, h2, h3, p { margin: 0; }
 .ms-trophy.big { width: 52px; height: 52px; }
 .ms-banner { display: flex; gap: 14px; align-items: center; padding: 16px; border-radius: 16px; border: 1px solid rgba(245,196,81,0.45); background: linear-gradient(180deg, rgba(245,196,81,0.16) 0%, var(--card) 100%); }
 .ms-banner-label { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gold); }
+
+/* 1.9.0 — last workout line, this week, your session, how the weight is logged */
+.last-line { align-self: stretch; min-height: 36px; margin-top: -4px; border: 0; background: transparent; color: var(--muted); font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 2px; white-space: nowrap; padding: 0; }
+.last-line-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.last-line svg { flex-shrink: 0; }
+.week-strip { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; }
+.week-day { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.week-dot { width: 36px; height: 36px; }
+.week-next { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.sess-card { gap: 6px; }
+.sess-row { min-height: 52px; display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); font-size: 16px; color: var(--text); font-weight: 400; }
+.sess-icon { color: var(--label); display: flex; }
+.sess-label { flex: 1; }
+.sess-input { width: 76px; height: 40px; text-align: right; font-weight: 700; padding: 0 10px; }
+.sess-unit { width: 32px; font-size: 14px; color: var(--muted); }
+.sess-mood { padding-top: 8px; }
+.moods { display: flex; gap: 6px; }
+.mood { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line-2); background: transparent; font-size: 22px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.mood.on { border: 2px solid var(--accent); background: rgba(91,155,255,0.18); }
+.load-list { border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
+.load-item + .load-item { border-top: 1px solid var(--line); }
+.load-item.on { background: rgba(91,155,255,0.08); }
+.load-opt { width: 100%; min-height: 52px; display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px; border: 0; background: transparent; color: var(--text); text-align: left; }
+.radio-dot { flex-shrink: 0; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; border: 2px solid #4A5A7E; display: flex; align-items: center; justify-content: center; }
+.load-item.on .radio-dot { border-color: var(--accent); }
+.load-item.on .radio-dot::after { content: ''; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.load-text { display: flex; flex-direction: column; gap: 2px; }
+.load-title { font-size: 16px; font-weight: 600; }
+.load-bar { padding: 0 12px 12px 46px; display: flex; flex-direction: column; gap: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips .chip-btn { min-height: 36px; padding: 0 12px; font-size: 14px; }
+.load-other { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-2); font-weight: 500; }
+.load-other .input { width: 80px; text-align: center; }
+.record svg { flex-shrink: 0; }
