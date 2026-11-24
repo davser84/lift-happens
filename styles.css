@@ -315,3 +315,8 @@ h1, h2, h3, p { margin: 0; }
 .dp-range { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--text-2); }
 .dp-range .input { width: 64px; text-align: center; font-weight: 700; }
 .sum-row.no-bar { grid-template-columns: minmax(0, 1fr) auto; }
+
+/* 1.11.0 — exercise search */
+.search { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 6px 0 14px; border: 1px solid var(--line-2); border-radius: 14px; background: var(--bg); color: var(--muted); }
+.search input { flex: 1; min-width: 0; height: 44px; border: 0; background: transparent; color: var(--text); font-size: 17px; outline: none; -webkit-appearance: none; appearance: none; }
+.search input::-webkit-search-cancel-button { display: none; }

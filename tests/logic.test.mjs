@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_SETTINGS, increase, decrease, startingSets, createSession, setsFromHistory,
+  DEFAULT_SETTINGS, increase, decrease, startSets, createSession, setsFromHistory, moveSchemes, schemeTextOf,
   nextPlanAfter, plannedPlanId, sessionSummary, personalRecord, exerciseHistory, validateImport,
   pickDailyQuote, localDayKey, pendingReminder, applyScheme, currentScheme, nextPlanAfterDelete, hasReminder, mergeExercisesFile,
   schemeChange, previousSameType, suggestIncrease, daysSinceBackup, backupDue, weekKey, weeksInARow,
@@ -31,33 +31,24 @@ test('dumbbell steps: 1 kg up to 10, then 2 kg', () => {
 const session = (id, startedAt, entries, finishedAt = startedAt) => ({ id, planId: 'A', startedAt, finishedAt, entries });
 const entry = (exerciseId, sets, status = 'done', doneAt = null) => ({ id: exerciseId + Math.random(), exerciseId, status, doneAt, sets });
 
-test('starting weights: plan weight when no history', () => {
-  const sets = startingSets({ exerciseId: 'x', sets: 3, reps: 8, weight: 27.5 }, []);
-  assert.deepEqual(sets, [{ weight: 27.5, reps: 8 }, { weight: 27.5, reps: 8 }, { weight: 27.5, reps: 8 }]);
+test('starting values: empty weights and the exercise’s sets × reps when there is no history', () => {
+  const sets = startSets({ id: 'x', sets: 2, reps: 10 }, []);
+  assert.deepEqual(sets, [{ weight: null, reps: 10 }, { weight: null, reps: 10 }]);
+  assert.equal(startSets({ id: 'x' }, []).length, 3, 'no sets yet: 3 × 8');
+  assert.equal(startSets({ id: 'x' }, [])[0].reps, 8);
 });
 
-test('starting weights: empty when no history and no plan weight', () => {
-  const sets = startingSets({ exerciseId: 'x', sets: 2, reps: 8, weight: null }, []);
-  assert.deepEqual(sets, [{ weight: null, reps: 8 }, { weight: null, reps: 8 }]);
-});
-
-test('starting weights: last done session wins, set by set, reps from plan', () => {
+test('starting weights: last done session wins, set by set, reps from the exercise', () => {
   const hist = [session('s1', '2026-11-10T10:00:00Z', [entry('x', [{ weight: 27.5, reps: 8 }, { weight: 27.5, reps: 7 }, { weight: 30, reps: 6 }])])];
-  const sets = startingSets({ exerciseId: 'x', sets: 3, reps: 8, weight: 25, weightEditedAt: '2026-11-01T00:00:00Z' }, hist);
+  const sets = startSets({ id: 'x', sets: 3, reps: 8 }, hist);
   assert.deepEqual(sets.map((s) => s.weight), [27.5, 27.5, 30]);
   assert.deepEqual(sets.map((s) => s.reps), [8, 8, 8]);
 });
 
-test('starting weights: plan weight edited after last session wins (deload)', () => {
-  const hist = [session('s1', '2026-11-10T10:00:00Z', [entry('x', [{ weight: 40, reps: 8 }])])];
-  const sets = startingSets({ exerciseId: 'x', sets: 2, reps: 8, weight: 35, weightEditedAt: '2026-11-12T00:00:00Z' }, hist);
-  assert.deepEqual(sets.map((s) => s.weight), [35, 35]);
-});
-
 test('starting weights: more sets than last log copy the last set, fewer take the first', () => {
   const hist = [session('s1', '2026-11-10T10:00:00Z', [entry('x', [{ weight: 20, reps: 8 }, { weight: 22.5, reps: 8 }])])];
-  assert.deepEqual(startingSets({ exerciseId: 'x', sets: 4, reps: 8, weight: null }, hist).map((s) => s.weight), [20, 22.5, 22.5, 22.5]);
-  assert.deepEqual(startingSets({ exerciseId: 'x', sets: 1, reps: 8, weight: null }, hist).map((s) => s.weight), [20]);
+  assert.deepEqual(startSets({ id: 'x', sets: 4, reps: 8 }, hist).map((s) => s.weight), [20, 22.5, 22.5, 22.5]);
+  assert.deepEqual(startSets({ id: 'x', sets: 1, reps: 8 }, hist).map((s) => s.weight), [20]);
 });
 
 test('starting weights: skipped and open entries are ignored', () => {
@@ -65,14 +56,16 @@ test('starting weights: skipped and open entries are ignored', () => {
     session('s1', '2026-11-10T10:00:00Z', [entry('x', [{ weight: 20, reps: 8 }])]),
     session('s2', '2026-11-13T10:00:00Z', [entry('x', [{ weight: 99, reps: 8 }], 'skipped')])
   ];
-  assert.equal(startingSets({ exerciseId: 'x', sets: 1, reps: 8, weight: null }, hist)[0].weight, 20);
+  assert.equal(startSets({ id: 'x', sets: 1, reps: 8 }, hist)[0].weight, 20);
 });
 
 test('weights carry across plans (same exercise id)', () => {
   const hist = [{ id: 's1', planId: 'A', startedAt: '2026-11-10T10:00:00Z', finishedAt: '2026-11-10T11:00:00Z', entries: [entry('face', [{ weight: 26.25, reps: 12 }])] }];
-  const planB = { id: 'B', items: [{ id: 'i1', exerciseId: 'face', sets: 3, reps: 12, weight: 25, weightEditedAt: null }] };
-  const s = createSession(planB, hist, new Date('2026-11-12T10:00:00Z'));
+  const planB = { id: 'B', items: [{ id: 'i1', exerciseId: 'face' }] };
+  const s = createSession(planB, hist, new Date('2026-11-12T10:00:00Z'), { face: { id: 'face', sets: 3, reps: 12 } });
   assert.deepEqual(s.entries[0].sets.map((x) => x.weight), [26.25, 26.25, 26.25]);
+  assert.deepEqual(s.entries[0].sets.map((x) => x.reps), [12, 12, 12]);
+  assert.equal(s.entries[0].plannedSets, 3);
   assert.equal(s.entries[0].status, 'open');
 });
 
@@ -129,22 +122,20 @@ test('personal record: first time reached, with set position', () => {
 test('import validation', () => {
   assert.throws(() => validateImport({ app: 'other' }));
   const ok = validateImport({ app: 'lift-happens', exercises: [{ id: 'e1', name: 'Squat' }], plans: [{ id: 'A', name: 'A', items: [{ exerciseId: 'e1', sets: '3', reps: 8, weight: '' }] }] });
-  assert.equal(ok.plans[0].items[0].sets, 3);
-  assert.equal(ok.plans[0].items[0].weight, null);
+  assert.equal(ok.plans[0].items[0].sets, 3, 'kept until moved to the exercise');
+  assert.equal('weight' in ok.plans[0].items[0], false);
   assert.equal(ok.exercises[0].equipment, 'machine');
   assert.throws(() => validateImport({ app: 'lift-happens', exercises: [], plans: [{ id: 'A', name: 'A', items: [{ exerciseId: 'zz' }] }] }));
 });
 
-test('summary: first workout compares with the plan starting weight', () => {
-  const plan = { id: 'A', items: [{ id: 'i1', exerciseId: 'x', sets: 3, reps: 8, weight: 27.5 }] };
+test('summary: the first time an exercise is done there is nothing to compare', () => {
+  const plan = { id: 'A', items: [{ id: 'i1', exerciseId: 'x' }] };
   const s = { id: 's1', planId: 'A', startedAt: '2026-11-17T10:00:00Z', finishedAt: null,
     entries: [{ id: 'e1', exerciseId: 'x', planItemId: 'i1', kind: 'planned', status: 'done', sets: [{ weight: 27.5, reps: 8 }, { weight: 27.5, reps: 8 }, { weight: 30, reps: 8 }] }] };
   const sum = sessionSummary(s, [s], { x: { name: 'Bench' } }, plan);
-  assert.equal(sum.rows[0].vsPlan, true);
-  assert.equal(sum.rows[0].delta, 2.5);
-  assert.equal(sum.rows[0].record, null);
-  assert.equal(sum.volLast, 660);
-  assert.equal(sum.volToday, 680);
+  assert.equal(sum.rows[0].vsPlan, false);
+  assert.equal(sum.rows[0].delta, null);
+  assert.equal(sum.volBase, null);
 });
 
 test('daily quote: same all day, new one the next launch day', () => {
@@ -219,27 +210,41 @@ test('rotation goes back only when the latest workout is deleted', () => {
   assert.equal(nextPlanAfterDelete([a, b], a, settings), 'A');
 });
 
-test('start weight is used only until the exercise has a log', () => {
-  const item = { id: 'i', exerciseId: 'x', sets: 3, reps: 8, weight: null };
-  const ex = { x: { id: 'x', startWeight: 72.5 } };
-  const s0 = createSession({ id: 'A', items: [item] }, [], new Date('2026-11-19T10:00:00Z'), ex);
-  assert.deepEqual(s0.entries[0].sets.map((x) => x.weight), [72.5, 72.5, 72.5]);
-  const logged = [{ id: 'p', planId: 'A', startedAt: '2026-11-18T10:00:00Z', finishedAt: '2026-11-18T11:00:00Z', entries: [{ id: 'e', exerciseId: 'x', status: 'done', sets: [{ weight: 75, reps: 8 }] }] }];
-  const s1 = createSession({ id: 'A', items: [item] }, logged, new Date('2026-11-19T10:00:00Z'), ex);
-  assert.deepEqual(s1.entries[0].sets.map((x) => x.weight), [75, 75, 75]);
-  assert.deepEqual(setsFromHistory('x', 2, 8, [], { fallbackWeight: 12 }).map((x) => x.weight), [12, 12]);
+test('1.11.0: sets and reps move from the plans to the exercises; plans keep only the order', () => {
+  const exercises = [{ id: 'face', name: 'Face Pull', startWeight: 20 }, { id: 'lp', name: 'Leg Press', double: true, repMin: 6, repMax: 10 }, { id: 'x', name: 'Not in a plan' }];
+  const plans = [
+    { id: 'B', name: 'B', order: 1, items: [{ id: 'b1', exerciseId: 'face', sets: 4, reps: 15, weight: 25 }] },
+    { id: 'A', name: 'A', order: 0, items: [{ id: 'a1', exerciseId: 'face', sets: 3, reps: 12, weight: 25 }, { id: 'a2', exerciseId: 'lp', sets: 3, reps: 8, weight: 80, weightEditedAt: 'x' }] }
+  ];
+  const m = moveSchemes(exercises, plans);
+  const by = Object.fromEntries(m.exercises.map((e) => [e.id, e]));
+  assert.deepEqual([by.face.sets, by.face.reps, by.face.dSets], [3, 12, 3], 'the first plan (A) wins');
+  assert.equal('startWeight' in by.face, false);
+  assert.deepEqual([by.lp.sets, by.lp.reps, by.lp.dSets, by.lp.repMin], [3, 8, 3, 6]);
+  assert.deepEqual([by.x.sets, by.x.reps], [3, 8]);
+  assert.deepEqual(m.plans[1].items, [{ id: 'a1', exerciseId: 'face' }, { id: 'a2', exerciseId: 'lp' }]);
+  assert.equal(schemeTextOf(by.lp, 'double'), '3 × 6–10');
+  assert.equal(schemeTextOf(by.lp, 'classic'), '3 × 8');
+  assert.equal(schemeTextOf(by.face, 'double'), '3 × 12');
+  // Backups from before 1.11.0 keep their plan sets and reps until they are moved.
+  const data = validateImport({ app: 'lift-happens', exercises, plans });
+  assert.deepEqual(data.plans[1].items[0], { id: 'a1', exerciseId: 'face', sets: 3, reps: 12 });
+  const now = validateImport({ app: 'lift-happens', exercises: m.exercises, plans: m.plans });
+  assert.deepEqual(now.plans[1].items[0], { id: 'a1', exerciseId: 'face' });
+  assert.deepEqual([now.exercises[1].sets, now.exercises[1].dSets], [3, 3]);
 });
 
 test('exercises file is merged by name, duplicates skipped', () => {
   const existing = [{ id: 'face_pull', name: 'Face Pull' }];
   const r = mergeExercisesFile({ app: 'lift-happens', kind: 'exercises', exercises: [
-    { id: 'lat', name: 'Lat Pulldown', equipment: 'machine', startWeight: 72.5 },
+    { id: 'lat', name: 'Lat Pulldown', equipment: 'machine', sets: 4, reps: 10 },
     { name: ' face pull ' },
-    { name: 'Dumbbell Shrugs', equipment: 'dumbbell', startWeight: '26' }
+    { name: 'Dumbbell Shrugs', equipment: 'dumbbell' }
   ] }, existing);
   assert.deepEqual(r.added.map((e) => e.name), ['Lat Pulldown', 'Dumbbell Shrugs']);
   assert.deepEqual(r.skipped, ['face pull']);
-  assert.equal(r.added[1].startWeight, 26);
+  assert.deepEqual([r.added[0].sets, r.added[0].reps, r.added[0].dSets], [4, 10, 4]);
+  assert.deepEqual([r.added[1].sets, r.added[1].reps], [3, 8], 'no sets in the file: 3 × 8');
   assert.equal(r.added[1].equipment, 'dumbbell');
   assert.throws(() => mergeExercisesFile({ app: 'x' }, existing));
 });
@@ -266,19 +271,15 @@ test('summary: volume vs the previous workout of the same type, exercises vs the
   assert.equal(sessionSummary(a2, [...all, a3], ex).volLast, 800);
 });
 
-test('summary: first workout of a type compares volume with the plan, else nothing', () => {
-  const plan = { id: 'B', items: [{ id: 'i1', exerciseId: 'x', sets: 3, reps: 8, weight: 20 }] };
+test('summary: first workout of a type has no volume comparison; exercises still compare with their last time', () => {
+  const plan = { id: 'B', items: [{ id: 'i1', exerciseId: 'x' }] };
   const a1 = { id: 'a1', planId: 'A', startedAt: '2026-11-10T10:00:00Z', finishedAt: '2026-11-10T11:00:00Z', entries: [entry('x', [{ weight: 25, reps: 8 }])] };
   const b1 = { id: 'b1', planId: 'B', startedAt: '2026-11-12T10:00:00Z', finishedAt: '2026-11-12T11:00:00Z',
     entries: [{ id: 'e', exerciseId: 'x', planItemId: 'i1', kind: 'planned', status: 'done', sets: [{ weight: 25, reps: 8 }, { weight: 25, reps: 8 }, { weight: 25, reps: 8 }] }] };
   const sum = sessionSummary(b1, [a1, b1], { x: { name: 'Face Pull' } }, plan);
-  assert.equal(sum.volBase, 'plan');
-  assert.equal(sum.volLast, 480);
-  assert.equal(sum.volToday, 600);
+  assert.equal(sum.volBase, null);
+  assert.equal(sum.volPct, null);
   assert.equal(sum.rows[0].delta, 0, 'the exercise row still compares with its last time (A, 25 kg)');
-  const none = sessionSummary(b1, [a1, b1], { x: { name: 'Face Pull' } }, { id: 'B', items: [{ id: 'i1', exerciseId: 'x', sets: 3, reps: 8, weight: null }] });
-  assert.equal(none.volBase, null);
-  assert.equal(none.volPct, null);
 });
 
 test('plan update offer: set count or even reps differ from the plan', () => {
@@ -299,18 +300,18 @@ const doneSess = (id, day, sets, extra = {}) => ({ id, planId: 'A', startedAt: d
 const s3 = (w, r = 8) => [{ weight: w, reps: r }, { weight: w, reps: r }, { weight: w, reps: r }];
 
 test('suggestion: two full times in a row at the same weights', () => {
-  const item = { id: 'i1', exerciseId: 'x', sets: 3, reps: 8 };
+  const X = { id: 'x', sets: 3, reps: 8 };
   const cur = { id: 'c', exerciseId: 'x', planItemId: 'i1', kind: 'planned', status: 'open', sets: s3(50) };
   const two = [doneSess('a', '2026-11-10', s3(50)), doneSess('b', '2026-11-12', s3(50))];
-  assert.equal(suggestIncrease(two, cur, item, { id: 'x' }, 'now'), true);
-  assert.equal(suggestIncrease(two.slice(1), cur, item, { id: 'x' }, 'now'), false, 'only once');
-  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(47.5)), two[1]], cur, item, {}, 'now'), false, 'weight changed');
-  assert.equal(suggestIncrease([two[0], doneSess('b', '2026-11-12', [{ weight: 50, reps: 8 }, { weight: 50, reps: 8 }, { weight: 50, reps: 6 }])], cur, item, {}, 'now'), false, 'reps missed');
-  assert.equal(suggestIncrease(two, cur, item, { noSuggest: true }, 'now'), false, 'switched off');
-  assert.equal(suggestIncrease(two, { ...cur, sets: s3(52.5) }, item, {}, 'now'), false, 'already raised today');
-  assert.equal(suggestIncrease(two, { ...cur, kind: 'added' }, item, {}, 'now'), false);
-  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(0)), doneSess('b', '2026-11-12', s3(0))], cur, item, {}, 'now'), false, 'bodyweight');
-  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(50, 10)), doneSess('b', '2026-11-12', s3(50, 9))], cur, item, {}, 'now'), true, 'more reps than planned is fine');
+  assert.equal(suggestIncrease(two, cur, X, 'now'), true);
+  assert.equal(suggestIncrease(two.slice(1), cur, X, 'now'), false, 'only once');
+  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(47.5)), two[1]], cur, X, 'now'), false, 'weight changed');
+  assert.equal(suggestIncrease([two[0], doneSess('b', '2026-11-12', [{ weight: 50, reps: 8 }, { weight: 50, reps: 8 }, { weight: 50, reps: 6 }])], cur, X, 'now'), false, 'reps missed');
+  assert.equal(suggestIncrease(two, cur, { ...X, noSuggest: true }, 'now'), false, 'switched off');
+  assert.equal(suggestIncrease(two, { ...cur, sets: s3(52.5) }, X, 'now'), false, 'already raised today');
+  assert.equal(suggestIncrease(two, { ...cur, kind: 'added' }, X, 'now'), false);
+  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(0)), doneSess('b', '2026-11-12', s3(0))], cur, X, 'now'), false, 'bodyweight');
+  assert.equal(suggestIncrease([doneSess('a', '2026-11-10', s3(50, 10)), doneSess('b', '2026-11-12', s3(50, 9))], cur, X, 'now'), true, 'more reps than planned is fine');
 });
 
 test('backup reminder after 30 days, Not now for 7', () => {
@@ -512,14 +513,14 @@ test('session data line, this week and the closest milestone', () => {
 // ---------- 1.10.0: double progression ----------
 
 import {
-  createSession as cs110, startingSets as ss110, doubleReady, atTop, schemeChange as sc110, suggestIncrease as si110,
+  createSession as cs110, startSets as ss110, doubleReady, atTop, schemeChange as sc110, suggestIncrease as si110,
   sessionSummary as sum110, defaultRange, isDoubleEx, entryMode, startOpts, validateImport as vi110, DEFAULT_SETTINGS as DS110
 } from '../js/logic.js';
 
-const LP = { id: 'lp', name: 'Leg Press', equipment: 'machine', load: 'total', double: true, repMin: 6, repMax: 10 };
-const FP = { id: 'fp', name: 'Face Pull', equipment: 'machine', load: 'total', double: false, repMin: 10, repMax: 15 };
+const LP = { id: 'lp', name: 'Leg Press', equipment: 'machine', load: 'total', double: true, repMin: 6, repMax: 10, sets: 3, reps: 8, dSets: 3 };
+const FP = { id: 'fp', name: 'Face Pull', equipment: 'machine', load: 'total', double: false, repMin: 10, repMax: 15, sets: 3, reps: 12, dSets: 3 };
 const EXS110 = { lp: LP, fp: FP };
-const PLAN110 = { id: 'b', items: [{ id: 'i1', exerciseId: 'lp', sets: 3, reps: 8, weight: null }, { id: 'i2', exerciseId: 'fp', sets: 3, reps: 12, weight: null }] };
+const PLAN110 = { id: 'b', items: [{ id: 'i1', exerciseId: 'lp' }, { id: 'i2', exerciseId: 'fp' }] };
 let n110 = 0;
 const done110 = (exerciseId, sets, mode, extra = {}) => ({ id: 'e' + (++n110), exerciseId, planItemId: exerciseId === 'lp' ? 'i1' : 'i2', kind: 'planned', status: 'done', doneAt: null, sets, ...(mode ? { mode } : {}), ...extra });
 const sess110 = (day, entries, mode) => ({ id: 's' + day, planId: 'b', startedAt: '2026-11-' + day + 'T18:00:00Z', finishedAt: '2026-11-' + day + 'T19:00:00Z', entries, ...(mode ? { mode } : {}) });
@@ -555,10 +556,10 @@ test('starting values: Classic and Double kept apart; first time in Double = Cla
   assert.deepEqual(s.entries.map((e) => e.mode), ['classic', 'classic']);
   assert.deepEqual(s.entries[0].sets, W(80, [8, 8, 8]), 'Classic: last Classic weights, plan reps');
   // Only Double history so far: Classic falls back to it (weights), with the plan's reps.
-  const onlyDbl = ss110(PLAN110.items[0], [dbl], startOpts('classic', LP, {}));
+  const onlyDbl = ss110(LP, [dbl], startOpts('classic', LP, {}));
   assert.deepEqual(onlyDbl, W(85, [8, 8, 8]));
   // An extra set copies the last one, reps included.
-  const four = ss110({ ...PLAN110.items[0], sets: 4 }, [dbl], startOpts('double', LP, {}));
+  const four = ss110({ ...LP, dSets: 4 }, [dbl], startOpts('double', LP, {}));
   assert.deepEqual(four, W(85, [9, 8, 7, 7]));
 });
 
@@ -579,17 +580,17 @@ test('top of the range: the message today, the reminder next time (weights uncha
 });
 
 test('plan question in Double: only a different set count; Classic suggestion ignores Double', () => {
-  const item = PLAN110.items[0];
-  assert.equal(sc110({ kind: 'planned', mode: 'double', sets: W(80, [10, 9, 9]) }, item), null);
-  const ch = sc110({ kind: 'planned', mode: 'double', sets: W(80, [10, 9, 9, 8]) }, item);
-  assert.deepEqual([ch.to.sets, ch.to.reps, ch.setsOnly], [4, 8, true]);
-  assert.ok(sc110({ kind: 'planned', sets: W(80, [10, 10, 10]) }, item), 'Classic still asks about reps');
+  assert.equal(sc110({ kind: 'planned', mode: 'double', sets: W(80, [10, 9, 9]) }, LP), null);
+  const ch = sc110({ kind: 'planned', mode: 'double', sets: W(80, [10, 9, 9, 8]) }, LP);
+  assert.deepEqual([ch.from.sets, ch.to.sets, ch.setsOnly], [3, 4, true]);
+  assert.ok(sc110({ kind: 'planned', sets: W(80, [10, 10, 10]) }, LP), 'Classic still asks about reps');
+  assert.equal(sc110({ kind: 'planned', sets: W(80, [8, 8, 8]) }, LP), null);
   const c1 = sess110('08', [done110('lp', W(80, [8, 8, 8]))]);
   const c2 = sess110('10', [done110('lp', W(80, [8, 8, 8]))]);
   const d1 = sess110('12', [done110('lp', W(85, [6, 6, 6]), 'double')], 'double');
   const open = { kind: 'planned', status: 'open', exerciseId: 'lp', sets: W(80, [8, 8, 8]) };
-  assert.equal(si110([c1, c2, d1], open, item, LP, 'now'), true, 'the last two Classic times count');
-  assert.equal(si110([c1, c2], { ...open, mode: 'double' }, item, LP, 'now'), false);
+  assert.equal(si110([c1, c2, d1], open, LP, 'now'), true, 'the last two Classic times count');
+  assert.equal(si110([c1, c2], { ...open, mode: 'double' }, LP, 'now'), false);
 });
 
 test('summary of a Double workout: more reps at the same weight, compared within the mode', () => {
@@ -606,6 +607,10 @@ test('summary of a Double workout: more reps at the same weight, compared within
   assert.equal(sum.moreReps, 1);
   assert.equal(sum.same, 1);
   assert.equal(sum.records, 0, 'records count every workout: 90 kg in Classic is still the best');
+  // The first Double time compares with the last Classic time, where its weights came from.
+  const c2 = sess110('09', [done110('lp', W(85, [8, 8, 8]))]);
+  const first = sum110(d1, [c, c2, d1], EXS110, PLAN110).rows.find((r) => r.exerciseId === 'lp');
+  assert.deepEqual([first.prevTop, first.delta, first.repsDelta], [85, 0, -1]);
 });
 
 test('backups keep Double progression and its range', () => {

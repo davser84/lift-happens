@@ -2,7 +2,7 @@ import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.j
 import * as db from './db.js';
 import {
   DEFAULT_SETTINGS, uid, round2, fmtNum, fmtWeight, parseNum, increase, decrease,
-  createSession, startingSets, setsFromHistory, hasEmptyWeight, activePlans, nextPlanAfter,
+  createSession, startSets, classicScheme, doubleSets, schemeTextOf, moveSchemes, hasEmptyWeight, activePlans, nextPlanAfter,
   plannedPlanId, sessionSummary, exerciseHistory, personalRecord, schemeText, setsText,
   validateImport, buildExport, pickDailyQuote, localDayKey,
   pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange,
@@ -13,7 +13,7 @@ import {
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.10.0';
+const VERSION = '1.11.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -149,6 +149,25 @@ async function setUpLoadsOnce(exercises, settings) {
   return { exercises: list, settings: next };
 }
 
+// 1.11.0, once: sets and reps move from the plans to the exercises; plans keep only the order.
+async function moveSchemesOnce(exercises, plans, settings) {
+  if (settings.schemesMoved) return { exercises, plans, settings };
+  const moved = moveSchemes(exercises, plans);
+  const next = { ...settings, schemesMoved: true };
+  try {
+    if (moved.exercises.length) await db.putMany('exercises', moved.exercises);
+    if (moved.plans.length) await db.putMany('plans', moved.plans);
+    await db.saveSettings(next);
+  } catch (err) { console.warn('Could not move sets and reps to the exercises', err); }
+  return { ...moved, settings: next };
+}
+
+// Every one-time update, in order, for data loaded at start or imported from a file.
+async function upgradeData(exercises, plans, settings) {
+  const a = await setUpLoadsOnce(exercises, settings);
+  return moveSchemesOnce(a.exercises, plans, a.settings);
+}
+
 // ======================================================================
 // Small helpers and shared pieces
 // ======================================================================
@@ -202,6 +221,7 @@ const P = {
   down: 'M12 5v14M6 13l6 6 6-6',
   chevron: 'M6 9l6 6 6-6',
   clock: 'M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16M12 8v4l3 2',
+  search: 'M11 5a6 6 0 1 0 0 12a6 6 0 1 0 0-12M20 20l-4.5-4.5',
   heart: 'M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z',
   bell: 'M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
@@ -266,7 +286,7 @@ function ExercisePicker({ title, sub, exclude, onPick, onClose, showLast }) {
   const create = () => {
     const n = name.trim();
     if (!n) return;
-    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, load: 'total' };
+    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, load: 'total', sets: 3, reps: 8, dSets: 3 };
     saveExercise(ex);
     onPick(ex.id);
   };
@@ -288,7 +308,7 @@ function lastWeightText(exId) {
   const h = exerciseHistory(state.sessions, exId);
   if (!h.length) {
     const ex = state.exercises.find((e) => e.id === exId);
-    return ex && ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtWeight(ex.startWeight) : '';
+    return '';
   }
   const last = h[h.length - 1];
   const ex = state.exercises.find((e) => e.id === exId);
@@ -343,8 +363,8 @@ async function importFile(file) {
     const hasData = state.plans.length || state.sessions.length;
     if (hasData && !window.confirm('Replace all plans and history on this iPhone with this file?')) return;
     await db.replaceAll(data);
-    const set = await setUpLoadsOnce(data.exercises, data.settings);
-    setState({ exercises: set.exercises, plans: data.plans, sessions: data.sessions, settings: set.settings, route: { name: 'home' } });
+    const set = await upgradeData(data.exercises, data.plans, data.settings);
+    setState({ exercises: set.exercises, plans: set.plans, sessions: data.sessions, settings: set.settings, route: { name: 'home' } });
     ensureDailyQuote();
     toast('Imported ' + data.exercises.length + ' exercises, ' + data.plans.length + ' plans, ' + data.sessions.length + ' workouts.');
   } catch (err) {
@@ -609,7 +629,9 @@ function Workout({ id }) {
   const opts = { excludeSessionId: id };
   const sessionMode = session.mode === 'double' ? 'double' : 'classic';
   // Starting values of one exercise in this workout's mode (Classic and Double kept apart).
-  const optsFor = (exId) => startOpts(sessionMode, exById[exId], { ...opts, fallbackWeight: (exById[exId] || {}).startWeight });
+  const optsFor = (exId) => startOpts(sessionMode, exById[exId], { ...opts });
+  // The exercise's own sets × reps (or sets × range) in this workout's mode, with its starting weights.
+  const startFor = (exId) => startSets(exById[exId] || { id: exId }, state.sessions, optsFor(exId));
 
   // Always patch the latest copy, so quick taps never overwrite each other.
   const patchEntries = (fn) => {
@@ -647,12 +669,10 @@ function Workout({ id }) {
     if (!fromSwipe) setOpenId(settings.autoAdvance ? after : null);
     const exDone = exById[e.exerciseId];
     if (atTop(e, exDone)) toast(exDone.name + ': all sets at ' + exDone.repMax + '. Next time: more weight.');
-    // Different sets or reps than the plan: offer to update the plan (asked again only if they change again).
-    const curPlan = state.plans.find((p) => p.id === getSession(id).planId);
-    const item = curPlan ? curPlan.items.find((it) => it.id === e.planItemId) : null;
-    const ch = schemeChange(e, item);
+    // Different sets or reps than the exercise's: offer to update it (asked again only if they change again).
+    const ch = schemeChange(e, exDone);
     if (ch && e.planAsked !== schemeLabel(ch.to)) {
-      setPlanAsk({ entryId: eid, itemId: item.id, name: (exById[e.exerciseId] || {}).name || 'Exercise', planLabel: planName(curPlan), ...ch });
+      setPlanAsk({ entryId: eid, exerciseId: e.exerciseId, name: (exDone || {}).name || 'Exercise', ...ch });
       if (!editing && allHandled()) finishAfterAsk.current = true;
       return;
     }
@@ -670,10 +690,10 @@ function Workout({ id }) {
     const label = schemeLabel(a.to);
     const shown = a.setsOnly ? a.to.sets + ' sets' : label;
     patchEntry(a.entryId, (x) => (update ? { ...x, plannedSets: a.to.sets, appliedScheme: a.setsOnly ? null : label, planAsked: label } : { ...x, planAsked: label }));
-    const cur = update ? state.plans.find((p) => p.id === getSession(id).planId) : null;
+    const cur = update ? state.exercises.find((x) => x.id === a.exerciseId) : null;
     if (cur) {
-      savePlan({ ...cur, items: cur.items.map((it) => (it.id === a.itemId ? { ...it, sets: a.to.sets, reps: a.to.reps } : it)) });
-      toast(planName(cur) + ' updated: ' + a.name + ' is now ' + shown + '.');
+      saveExercise(a.setsOnly ? { ...cur, dSets: a.to.sets } : { ...cur, sets: a.to.sets, reps: a.to.reps });
+      toast(a.name + ' is now ' + shown + ', in every workout.');
     }
     if (finishAfterAsk.current) { finishAfterAsk.current = false; autoFinish(); }
   };
@@ -697,33 +717,28 @@ function Workout({ id }) {
     autoFinish();
   };
 
-  const planItemOf = (e) => (plan ? plan.items.find((it) => it.id === e.planItemId) : null);
 
   const pickSwap = (entryId, exId) => {
     setSheet(null);
     patchEntry(entryId, (e) => {
-      const item = planItemOf(e);
-      const count = item ? item.sets : e.sets.length;
-      const reps = item ? item.reps : e.sets[0].reps;
+      const sets = startFor(exId);
       return {
         ...e, kind: 'swapped', status: 'open', doneAt: null,
         replacesExerciseId: e.kind === 'swapped' ? e.replacesExerciseId : e.exerciseId,
-        exerciseId: exId, plannedSets: count, appliedScheme: null, mode: entryMode(sessionMode, exById[exId]),
-        sets: setsFromHistory(exId, count, reps, state.sessions, optsFor(exId))
+        exerciseId: exId, plannedSets: sets.length, appliedScheme: null, mode: entryMode(sessionMode, exById[exId]), sets
       };
     });
     setOpenId(entryId);
   };
 
   const undoSwap = (e) => {
-    const item = planItemOf(e);
-    patchEntry(e.id, (x) => ({
-      ...x, kind: 'planned', exerciseId: x.replacesExerciseId, replacesExerciseId: null, status: 'open', doneAt: null,
-      plannedSets: item ? item.sets : x.plannedSets, appliedScheme: null, mode: entryMode(sessionMode, exById[x.replacesExerciseId]),
-      sets: item
-        ? startingSets(item, state.sessions, optsFor(x.replacesExerciseId))
-        : setsFromHistory(x.replacesExerciseId, x.sets.length, x.sets[0].reps, state.sessions, optsFor(x.replacesExerciseId))
-    }));
+    patchEntry(e.id, (x) => {
+      const sets = startFor(x.replacesExerciseId);
+      return {
+        ...x, kind: 'planned', exerciseId: x.replacesExerciseId, replacesExerciseId: null, status: 'open', doneAt: null,
+        plannedSets: sets.length, appliedScheme: null, mode: entryMode(sessionMode, exById[x.replacesExerciseId]), sets
+      };
+    });
   };
 
   const pickAdd = (exId) => {
@@ -734,7 +749,7 @@ function Workout({ id }) {
       return [...list, {
         id: newId, order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
         status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: entryMode(sessionMode, exById[exId]),
-        sets: setsFromHistory(exId, 3, 8, state.sessions, optsFor(exId))
+        sets: startFor(exId)
       }];
     });
     setOpenId(newId);
@@ -844,14 +859,17 @@ function Workout({ id }) {
     if (r.note && r.note.trim()) parts.push('“' + r.note.trim() + '”');
     return parts.join(' · ');
   };
+  // A "switch to 4 × 6" reminder: today's sets and, for an exercise of the plan, the exercise itself.
   const applyRem = (e, sc) => {
-    const item = planItemOf(e);
-    const toPlan = e.kind === 'planned' && item && plan;
     patchEntry(e.id, (x) => ({ ...x, sets: applyScheme(x.sets, sc), plannedSets: sc.sets, appliedScheme: schemeLabel(sc) }));
-    if (toPlan) {
-      const cur = state.plans.find((p) => p.id === plan.id);
-      savePlan({ ...cur, items: cur.items.map((it) => (it.id === item.id ? { ...it, sets: sc.sets, reps: sc.reps } : it)) });
-      toast(planName(plan) + ' updated: ' + (exById[e.exerciseId] || {}).name + ' is now ' + schemeLabel(sc) + '.');
+    const cur = e.kind === 'planned' ? state.exercises.find((x) => x.id === e.exerciseId) : null;
+    if (cur && modeOf(e) === 'double') {
+      // Double progression keeps its own sets; the reps come from the range.
+      saveExercise({ ...cur, dSets: sc.sets });
+      toast(cur.name + ' is now ' + sc.sets + ' sets, in every workout.');
+    } else if (cur) {
+      saveExercise({ ...cur, sets: sc.sets, reps: sc.reps });
+      toast(cur.name + ' is now ' + schemeLabel(sc) + ', in every workout.');
     }
   };
 
@@ -865,11 +883,10 @@ function Workout({ id }) {
 
   const card = (e) => {
     const ex = exById[e.exerciseId] || { name: 'Exercise', equipment: 'machine' };
-    const item = planItemOf(e);
     const incoming = e.status === 'open' ? pendingReminder(d.sessions, e.exerciseId, id) : null;
     const inRem = incoming ? incoming.reminder : null;
     const outRem = hasReminder(e.reminder) ? e.reminder : null;
-    const planned = e.plannedSets ?? (item ? item.sets : null);
+    const planned = e.plannedSets ?? null;
     const nowScheme = currentScheme(e.sets);
     const remOpen = remPanel === e.id;
     const myRem = e.reminder || {};
@@ -882,7 +899,7 @@ function Workout({ id }) {
       if (inRem.note && inRem.note.trim()) inChips.push('Note');
     }
     // Automatic suggestion (green): your own weight or scheme reminder always wins.
-    const suggest = !editing && !(inRem && (inRem.dir || inRem.scheme)) && suggestIncrease(d.sessions, e, item, ex, id);
+    const suggest = !editing && !(inRem && (inRem.dir || inRem.scheme)) && suggestIncrease(d.sessions, e, ex, id);
     // Double progression: reps inside the range first; all sets at the top last time → more weight.
     const dbl = modeOf(e) === 'double' && hasRange(ex);
     const ready = dbl && !editing && !(inRem && inRem.dir) ? doubleReady(d.sessions, e, ex, id) : null;
@@ -948,12 +965,12 @@ function Workout({ id }) {
             ${inRem.scheme ? html`<div class="rem-row">
               <strong>Switch to ${schemeLabel(inRem.scheme)}</strong>
               ${e.appliedScheme === schemeLabel(inRem.scheme)
-                ? html`<span class="small" style="color: #8AB8FF">${e.kind === 'planned' && item ? 'Plan updated ✓' : 'Applied today ✓'}</span>`
+                ? html`<span class="small" style="color: #8AB8FF">${e.kind === 'planned' ? 'Updated ✓' : 'Applied today ✓'}</span>`
                 : nowScheme && nowScheme.sets === inRem.scheme.sets && nowScheme.reps === inRem.scheme.reps
                   ? html`<span class="small muted">Already ${schemeLabel(inRem.scheme)}</span>`
-                  : html`<button class="btn btn-primary" onClick=${() => applyRem(e, inRem.scheme)}>${e.kind === 'planned' && item ? 'Apply' : 'Apply today'}</button>`}
+                  : html`<button class="btn btn-primary" onClick=${() => applyRem(e, inRem.scheme)}>${e.kind === 'planned' ? 'Apply' : 'Apply today'}</button>`}
             </div>` : null}
-            ${inRem.scheme && e.appliedScheme !== schemeLabel(inRem.scheme) && e.kind === 'planned' && item ? html`<span class="tiny muted">Apply changes today’s sets and ${planName(plan)} from now on.</span>` : null}
+            ${inRem.scheme && e.appliedScheme !== schemeLabel(inRem.scheme) && e.kind === 'planned' ? html`<span class="tiny muted">Apply changes today’s sets and ${ex.name} from now on.</span>` : null}
             ${inRem.note && inRem.note.trim() ? html`<em style="color: var(--text-2)">“${inRem.note.trim()}”</em>` : null}
             <span class="tiny muted">Cleared when you tap Done.</span>
           </div>` : null}
@@ -1117,14 +1134,14 @@ function Workout({ id }) {
 
     ${planAsk ? html`<div class="overlay center">
       <div class="dialog" role="alertdialog" aria-labelledby="plan-ask-title">
-        <h2 id="plan-ask-title">Update ${planAsk.planLabel}?</h2>
+        <h2 id="plan-ask-title">Update ${planAsk.name}?</h2>
         ${planAsk.setsOnly ? html`
-        <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: plan ${planAsk.from.sets} sets → this workout ${planAsk.to.sets} sets.</p>
-        <p class="small muted" style="line-height: 1.45">Update plan: ${planAsk.planLabel} uses ${planAsk.to.sets} sets from the next time. Only this workout: the plan stays at ${planAsk.from.sets}.</p>` : html`
-        <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: plan ${schemeLabel(planAsk.from)} → this workout ${schemeLabel(planAsk.to)}.</p>
-        <p class="small muted" style="line-height: 1.45">Update plan: ${planAsk.planLabel} uses ${schemeLabel(planAsk.to)} from the next time. Only this workout: the plan stays ${schemeLabel(planAsk.from)}.</p>`}
+        <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: ${planAsk.from.sets} sets → this workout ${planAsk.to.sets} sets.</p>
+        <p class="small muted" style="line-height: 1.45">Update: ${planAsk.name} has ${planAsk.to.sets} sets from the next time, in every workout. Only this workout: it stays at ${planAsk.from.sets}.</p>` : html`
+        <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: ${schemeLabel(planAsk.from)} → this workout ${schemeLabel(planAsk.to)}.</p>
+        <p class="small muted" style="line-height: 1.45">Update: ${planAsk.name} is ${schemeLabel(planAsk.to)} from the next time, in every workout. Only this workout: it stays ${schemeLabel(planAsk.from)}.</p>`}
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
-          <button class="btn btn-primary btn-big" autofocus onClick=${() => answerPlan(true)}>Update plan</button>
+          <button class="btn btn-primary btn-big" autofocus onClick=${() => answerPlan(true)}>Update ${planAsk.name}</button>
           <button class="btn btn-big" onClick=${() => answerPlan(false)}>Only this workout</button>
         </div>
       </div>
@@ -1144,15 +1161,12 @@ function SummaryCards({ sum, plan, live }) {
   const volPct = sum.volPct === null ? '—' : (sum.volPct > 0 ? '+' : sum.volPct < 0 ? '−' : '±') + Math.abs(sum.volPct).toFixed(1) + '%';
   const kg = (v) => Math.round(v).toLocaleString('en') + ' kg';
   const here = live ? 'today' : 'this workout';
-  let volTitle = 'Total volume vs last ' + planName(plan);
+  const volTitle = 'Total volume vs last ' + planName(plan);
   let volText;
   if (sum.volBase === 'previous' && sum.volLast > 0) {
     volText = 'Last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + '): ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (real load × reps, exercises done both times)';
   } else if (sum.volBase === 'previous') {
     volText = 'No exercises in common with the last ' + planName(plan) + ' (' + fmtDate(sum.volPrev.startedAt, true) + ').';
-  } else if (sum.volBase === 'plan') {
-    volTitle = 'Total volume vs plan';
-    volText = 'First ' + planName(plan) + ': compared with the plan’s starting weights. Plan: ' + kg(sum.volLast) + ' · ' + here + ': ' + kg(sum.volToday) + ' (real load × reps)';
   } else {
     volText = 'Nothing to compare yet: this is the first ' + planName(plan) + '.';
   }
@@ -1180,13 +1194,13 @@ function SummaryCards({ sum, plan, live }) {
             if (r.delta === null) { detail = r.bodyweight ? r.totalReps + ' reps' : wt(r.top) + ' · first time'; delta = 'new'; }
             else if (r.bodyweight) { detail = 'reps ' + r.prevReps + ' → ' + r.totalReps; delta = r.delta > 0 ? '+' + r.delta + ' reps' : r.delta < 0 ? '−' + (-r.delta) + ' reps' : 'same'; }
             else if (r.repsDelta !== null && r.repsDelta !== undefined) {
-              detail = wt(r.top) + ' · reps ' + r.prevReps + ' → ' + r.totalReps + (r.vsPlan ? ' · vs plan' : '');
+              detail = wt(r.top) + ' · reps ' + r.prevReps + ' → ' + r.totalReps;
               const n = Math.abs(r.repsDelta);
               delta = r.repsDelta > 0 ? '+' + n + (n === 1 ? ' rep' : ' reps') : r.repsDelta < 0 ? '−' + n + (n === 1 ? ' rep' : ' reps') : 'same';
               dir = r.repsDelta > 0 ? 'reps' : r.repsDelta < 0 ? 'down' : null;
             }
             else {
-              detail = (r.delta !== 0 ? wFrom(r.prevTop) + ' → ' + wt(r.top) : wt(r.top)) + (r.vsPlan ? ' · vs plan' : '');
+              detail = (r.delta !== 0 ? wFrom(r.prevTop) + ' → ' + wt(r.top) : wt(r.top));
               delta = r.delta > 0 ? '+' + fmtNum(r.delta) + ' kg' : r.delta < 0 ? '−' + fmtNum(-r.delta) + ' kg' : 'same';
               if (r.delta !== 0 && maxAbs > 0) { bw = Math.max(4, Math.round((Math.abs(r.delta) / maxAbs) * 50)); dir = r.delta > 0 ? 'up' : 'down'; }
             }
@@ -1249,7 +1263,7 @@ function addToFinished(id, exId) {
   const entry = {
     id: uid(), order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
     status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: entryMode(cur.mode, exById[exId]),
-    sets: setsFromHistory(exId, 3, 8, state.sessions, startOpts(cur.mode, exById[exId], { excludeSessionId: id, fallbackWeight: (exById[exId] || {}).startWeight }))
+    sets: startSets(exById[exId] || { id: exId }, state.sessions, startOpts(cur.mode, exById[exId], { excludeSessionId: id }))
   };
   saveSession({ ...cur, finishedAt: null, entries: [...cur.entries, entry] });
   go({ name: 'workout', id });
@@ -1312,136 +1326,77 @@ function Plans() {
   const d = useStore();
   const plans = activePlans(d.plans);
   const [tabId, setTabId] = useState(() => plannedPlanId(d.plans, d.settings));
-  const [draft, setDraft] = useState(null);
   const [openItem, setOpenItem] = useState(null);
   const [sheet, setSheet] = useState(null);
   const exById = exMap();
-  const saved = plans.find((p) => p.id === tabId) || plans[0];
-  if (!saved) return html`<div class="screen"><div class="main"><p class="muted">No plans.</p></div><${Nav} active="plans" /></div>`;
-  const plan = draft ? draft.plan : saved;
-  const exOf = (eid) => (draft && draft.exercises[eid]) || exById[eid] || { id: eid, name: 'Unknown', equipment: 'machine', setup: '' };
+  const plan = plans.find((p) => p.id === tabId) || plans[0];
+  if (!plan) return html`<div class="screen"><div class="main"><p class="muted">No plans.</p></div><${Nav} active="plans" /></div>`;
+  const exOf = (eid) => exById[eid] || { id: eid, name: 'Unknown', equipment: 'machine' };
 
-  const base = () => draft || { plan: JSON.parse(JSON.stringify(saved)), exercises: {} };
-  const editPlan = (fn) => { const b = base(); setDraft({ ...b, plan: fn(b.plan) }); };
-  const editItem = (itemId, patch) => editPlan((p) => ({ ...p, items: p.items.map((it) => (it.id === itemId ? { ...it, ...patch } : it)) }));
-  const editEx = (eid, patch) => { const b = base(); setDraft({ ...b, exercises: { ...b.exercises, [eid]: { ...exOf(eid), ...patch } } }); };
-
-  const switchTab = (pid) => {
-    if (pid === tabId) return;
-    if (draft && !window.confirm('Discard unsaved changes to ' + planName(saved) + '?')) return;
-    setDraft(null); setOpenItem(null); setTabId(pid);
-  };
-
-  const save = async () => {
-    if (!draft) return;
-    const now = new Date().toISOString();
-    const items = draft.plan.items.map((it) => {
-      const old = saved.items.find((o) => o.id === it.id);
-      const sets = Math.max(1, parseInt(it.sets, 10) || (old ? old.sets : 3));
-      const reps = Math.max(1, parseInt(it.reps, 10) || (old ? old.reps : 8));
-      const wNum = parseNum(it.weight);
-      const negOk = loadOf(draft.exercises[it.exerciseId] || exById[it.exerciseId]) === 'bodyweight';
-      const weight = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) || (wNum < 0 && !negOk) ? null : round2(wNum);
-      const changed = !old || old.weight !== weight || old.exerciseId !== it.exerciseId;
-      return { id: it.id, exerciseId: it.exerciseId, sets, reps, weight, weightEditedAt: changed && weight !== null ? now : (old ? old.weightEditedAt : null) };
-    });
-    for (const ex of Object.values(draft.exercises)) {
-      await saveExercise({ ...ex, name: (ex.name || '').trim() || exById[ex.id].name });
-    }
-    await savePlan({ ...draft.plan, items });
-    setDraft(null);
-    toast(planName(saved) + ' saved. It applies from the next workout.');
-  };
-
-  const move = (i, dir) => editPlan((p) => {
-    const items = p.items.slice();
+  // Only which exercises and in which order: every change is saved at once.
+  const savePlanItems = (items) => savePlan({ ...plan, items });
+  const move = (i, dir) => {
+    const items = plan.items.slice();
     const j = i + dir;
-    if (j < 0 || j >= items.length) return p;
+    if (j < 0 || j >= items.length) return;
     const t = items[i]; items[i] = items[j]; items[j] = t;
-    return { ...p, items };
-  });
-
+    savePlanItems(items);
+  };
+  const remove = (it) => {
+    const before = plan.items;
+    savePlanItems(before.filter((x) => x.id !== it.id));
+    setOpenItem(null);
+    toast(exOf(it.exerciseId).name + ' removed from ' + planName(plan) + '.', { label: 'Undo', run: () => { const cur = state.plans.find((p) => p.id === plan.id); if (cur) savePlan({ ...cur, items: before }); } });
+  };
   const inPlan = new Set(plan.items.map((it) => it.exerciseId));
   const pick = (exId) => {
     const sh = sheet;
     setSheet(null);
-    if (sh.mode === 'replace') editItem(sh.itemId, { exerciseId: exId, weight: '' });
-    else {
-      const newId = uid();
-      editPlan((p) => ({ ...p, items: [...p.items, { id: newId, exerciseId: exId, sets: '3', reps: '8', weight: '' }] }));
-      setOpenItem(newId);
-    }
+    if (sh.mode === 'replace') savePlanItems(plan.items.map((it) => (it.id === sh.itemId ? { ...it, exerciseId: exId } : it)));
+    else savePlanItems([...plan.items, { id: uid(), exerciseId: exId }]);
+  };
+  const lastW = (ex) => {
+    const last = lastDone(d.sessions, ex.id);
+    return last ? 'last ' + fmtLoad(last.top, ex) : 'no weight yet';
   };
 
   return html`<div class="screen">
     <div class="header">
       <div class="header-row">
         <h1 class="title">Plans</h1>
-        ${draft ? html`<div style="display: flex; gap: 6px">
-          <button class="btn btn-ghost" onClick=${() => { setDraft(null); setOpenItem(null); }}>Discard</button>
-          <button class="btn btn-primary" onClick=${save}>Save</button>
-        </div>` : html`<span class="small muted">All changes saved</span>`}
+        <span class="small muted">All changes saved</span>
       </div>
       <div class="seg" role="tablist" aria-label="Plan">
-        ${plans.map((p) => html`<button key=${p.id} role="tab" aria-selected=${p.id === saved.id} class=${p.id === saved.id ? 'on' : ''} onClick=${() => switchTab(p.id)}>${planName(p)}</button>`)}
+        ${plans.map((p) => html`<button key=${p.id} role="tab" aria-selected=${p.id === plan.id} class=${p.id === plan.id ? 'on' : ''} onClick=${() => { setOpenItem(null); setTabId(p.id); }}>${planName(p)}</button>`)}
       </div>
-      <p class="small muted" style="line-height: 1.45">The plan sets exercises, order, sets and reps. Weight is optional: leave it empty to enter it at the gym.</p>
+      <p class="small muted" style="line-height: 1.45">Which exercises and in which order. Sets, reps and everything else: Settings → Exercises.</p>
     </div>
     <div class="main">
       ${plan.items.length ? null : html`<${EmptyState}><p class="muted">No exercises in ${planName(plan)} yet. Add the first one below.</p></${EmptyState}>`}
       ${plan.items.map((it, i) => {
         const ex = exOf(it.exerciseId);
         const open = openItem === it.id;
-        const wNum = parseNum(it.weight);
-        const wTxt = it.weight === '' || it.weight === null || it.weight === undefined || Number.isNaN(wNum) ? '—' : fmtLoad(wNum, ex);
-        const negOk = loadOf(ex) === 'bodyweight';
         return html`<div key=${it.id} class=${'card' + (open ? ' ex-card open' : '')}>
           <button class="ex-head" style="min-height: 56px" aria-expanded=${open} onClick=${() => setOpenItem(open ? null : it.id)}>
             <span class="small muted num" style="width: 18px; align-self: flex-start; padding-top: 2px">${i + 1}</span>
             <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
               <span style="font-size: 16px; font-weight: 600; line-height: 1.25">${ex.name}</span>
-              <span class="small num" style="color: var(--text-2)">${(it.sets || '?') + ' × ' + (d.settings.progression === 'double' && isDoubleEx(ex) ? rangeText(ex) : (it.reps || '?')) + (wTxt === '—' ? '' : ' · ' + wTxt)}</span>
+              <span class="small num" style="color: var(--text-2)">${schemeTextOf(ex, d.settings.progression)} · ${lastW(ex)}</span>
             </span>
             <${ExIcon} id=${ex.id} />
           </button>
-          ${open ? html`<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line)">
-            <label class="field">Exercise name (renames it everywhere)
-              <input class="input" value=${ex.name} onInput=${(e) => editEx(ex.id, { name: e.target.value })} />
-            </label>
-            <div class="grid-3">
-              <label class="field">Sets<input class="input" inputmode="numeric" value=${it.sets} onInput=${(e) => editItem(it.id, { sets: e.target.value.replace(/[^0-9]/g, '') })} /></label>
-              <label class="field">${ex.double ? 'Reps (Classic)' : 'Reps'}<input class="input" inputmode="numeric" value=${it.reps} onInput=${(e) => editItem(it.id, { reps: e.target.value.replace(/[^0-9]/g, '') })} /></label>
-              <label class="field">Weight kg<input class="input" inputmode=${negOk ? 'text' : 'decimal'} placeholder="optional" value=${it.weight === null || it.weight === undefined ? '' : typeof it.weight === 'number' ? signedNum(it.weight) : it.weight} onInput=${(e) => editItem(it.id, { weight: e.target.value.replace(negOk ? /[^0-9.,\-\u2212]/g : /[^0-9.,]/g, '') })} /></label>
-            </div>
-            <${DoubleSwitch} key=${'dp' + ex.id} ex=${ex} planReps=${parseInt(it.reps, 10) || 8} onChange=${(patch) => editEx(ex.id, patch)} />
-            <div class="field">Equipment
-              <div class="seg" role="radiogroup" aria-label="Equipment">
-                <button role="radio" aria-checked=${ex.equipment !== 'dumbbell'} class=${ex.equipment !== 'dumbbell' ? 'on' : ''} onClick=${() => editEx(ex.id, { equipment: 'machine' })}>Machine / barbell</button>
-                <button role="radio" aria-checked=${ex.equipment === 'dumbbell'} class=${ex.equipment === 'dumbbell' ? 'on' : ''} onClick=${() => editEx(ex.id, { equipment: 'dumbbell' })}>Dumbbells</button>
-              </div>
-              <span class="tiny muted" style="font-weight: 400">${ex.equipment === 'dumbbell'
-                ? '+/− steps: ' + fmtNum(d.settings.stepDbSmall) + ' kg up to ' + fmtNum(d.settings.dbThreshold) + ' kg, then ' + fmtNum(d.settings.stepDbLarge) + ' kg'
-                : '+/− steps: ' + fmtNum(d.settings.stepMachine) + ' kg'}</span>
-            </div>
-            <${LoadPicker} key=${ex.id} ex=${ex} onChange=${(patch) => editEx(ex.id, patch)} />
-            <label class="field">Machine setup (shown with an extra tap)
-              <input class="input" placeholder="e.g. seat 4, pad XL" value=${ex.setup || ''} onInput=${(e) => editEx(ex.id, { setup: e.target.value })} />
-            </label>
-            <${SuggestSwitch} ex=${ex} onChange=${(on) => editEx(ex.id, { noSuggest: !on })} />
-            <div class="btn-row">
-              <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' up'} onClick=${() => move(i, -1)}><${Icon} name="up" size=${18} sw=${2.2} /></button>
-              <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' down'} onClick=${() => move(i, 1)}><${Icon} name="down" size=${18} sw=${2.2} /></button>
-              <button class="btn" onClick=${() => setSheet({ mode: 'replace', itemId: it.id, from: ex.name })}>Replace</button>
-              <button class="btn btn-warn" onClick=${() => { editPlan((p) => ({ ...p, items: p.items.filter((x) => x.id !== it.id) })); setOpenItem(null); }}>Remove</button>
-            </div>
+          ${open ? html`<div class="btn-row" style="padding: 0 12px 12px">
+            <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' up'} onClick=${() => move(i, -1)}><${Icon} name="up" size=${18} sw=${2.2} /></button>
+            <button class="icon-btn" style="background: var(--card-2)" aria-label=${'Move ' + ex.name + ' down'} onClick=${() => move(i, 1)}><${Icon} name="down" size=${18} sw=${2.2} /></button>
+            <button class="btn" onClick=${() => setSheet({ mode: 'replace', itemId: it.id, from: ex.name })}><${Icon} name="swap" size=${16} /> Replace</button>
+            <button class="btn btn-warn" onClick=${() => remove(it)}>Remove</button>
           </div>` : null}
         </div>`;
       })}
       <button class="btn-dashed" style="margin-top: 6px" onClick=${() => setSheet({ mode: 'add' })}><${Icon} name="plus" size=${18} sw=${2.2} /> Add exercise to ${planName(plan)}</button>
-      ${draft ? html`<p class="tiny muted" style="text-align: center; margin-top: 6px">Unsaved changes. Tap Save at the top.</p>` : null}
     </div>
     ${sheet ? html`<${ExercisePicker} title=${sheet.mode === 'replace' ? 'Replace ' + sheet.from + ' with…' : 'Add to ' + planName(plan)}
-      sub="Weights follow the exercise everywhere it is used." exclude=${inPlan}
+      sub="Sets, reps and weights follow the exercise everywhere it is used." exclude=${inPlan}
       onClose=${() => setSheet(null)} onPick=${pick} />` : null}
     <${Nav} active="plans" />
   </div>`;
@@ -1900,48 +1855,6 @@ function LoadPicker({ ex, onChange }) {
   </div>`;
 }
 
-// Double progression for one exercise: whether it can switch to its rep range. It stays as it is
-// when Settings changes mode; with it off the exercise always keeps the plan's sets × reps.
-function DoubleSwitch({ ex, planReps, onChange }) {
-  const on = !!ex.double;
-  const txt = (v) => (v ? String(v) : '');
-  const [minT, setMinT] = useState(txt(ex.repMin));
-  const [maxT, setMaxT] = useState(txt(ex.repMax));
-  useEffect(() => { setMinT(txt(ex.repMin)); setMaxT(txt(ex.repMax)); }, [ex.repMin, ex.repMax]);
-  const toggle = () => {
-    if (on) { onChange({ double: false }); return; }
-    const r = hasRange(ex) ? { min: ex.repMin, max: ex.repMax } : defaultRange(planReps);
-    onChange({ double: true, repMin: r.min, repMax: r.max });
-  };
-  // The edited end wins: a bottom above the top moves the top up, and the other way round.
-  const commit = (which) => {
-    let a = parseInt(minT, 10), b = parseInt(maxT, 10);
-    if (!(a >= 1 && a <= 50) || !(b >= 1 && b <= 50)) { setMinT(txt(ex.repMin)); setMaxT(txt(ex.repMax)); return; }
-    if (a > b) { if (which === 'min') b = a; else a = b; }
-    setMinT(String(a)); setMaxT(String(b));
-    if (a !== ex.repMin || b !== ex.repMax) onChange({ repMin: a, repMax: b });
-  };
-  const blurOnEnter = (e) => { if (e.key === 'Enter') e.target.blur(); };
-  return html`<div class=${'dp-switch' + (on ? ' on' : '')}>
-    <div class="row" style="gap: 12px">
-      <span style="display: flex; flex-direction: column; gap: 2px">
-        <span style="font-weight: 600">Double progression</span>
-        <span class="tiny muted" style="line-height: 1.4">${on
-          ? 'Used when Settings is on Double progression. Same range in every workout.'
-          : 'Off: always the plan’s sets × reps, in both modes.'}</span>
-      </span>
-      <button class=${'switch' + (on ? ' on' : '')} role="switch" aria-checked=${on} aria-label="Double progression" onClick=${toggle}><span></span></button>
-    </div>
-    ${on ? html`<div class="dp-range">Reps from
-      <input class="input" inputmode="numeric" enterkeyhint="done" aria-label="Lowest reps" value=${minT}
-        onInput=${(e) => setMinT(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))} onBlur=${() => commit('min')} onKeyDown=${blurOnEnter} />
-      to
-      <input class="input" inputmode="numeric" enterkeyhint="done" aria-label="Highest reps" value=${maxT}
-        onInput=${(e) => setMaxT(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))} onBlur=${() => commit('max')} onKeyDown=${blurOnEnter} />
-    </div>` : null}
-  </div>`;
-}
-
 // The per-exercise switch for automatic "more weight" suggestions (on unless switched off).
 function SuggestSwitch({ ex, onChange }) {
   const on = !ex.noSuggest;
@@ -1956,10 +1869,59 @@ function SuggestSwitch({ ex, onChange }) {
   </div>`;
 }
 
-function ExerciseEditor({ ex, inPlans, hasLog }) {
+// A whole number field saved when you leave it; empty or invalid goes back to the saved value.
+function IntField({ label, value, onSave, min = 1, max = 50 }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const commit = () => {
+    const n = parseInt(text, 10);
+    if (!(n >= min && n <= max)) { setText(String(value)); return; }
+    if (n !== value) onSave(n);
+  };
+  return html`<label class="field">${label}
+    <input class="input" inputmode="numeric" enterkeyhint="done" value=${text}
+      onInput=${(e) => setText(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))} onBlur=${commit} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} />
+  </label>`;
+}
+
+// Classic: sets and reps. Double progression: sets and the reps range. Choosing one decides how the
+// exercise works when Settings is on Double progression; the values of both are kept.
+function ProgressionFields({ ex, save }) {
+  const dbl = !!ex.double;
+  const cs = classicScheme(ex);
+  const choose = (on) => {
+    if (on === dbl) return;
+    if (!on) { save({ double: false }); return; }
+    const r = hasRange(ex) ? { min: ex.repMin, max: ex.repMax } : defaultRange(cs.reps);
+    save({ double: true, repMin: r.min, repMax: r.max, dSets: doubleSets(ex) });
+  };
+  // The edited end wins: a bottom above the top moves the top up, and the other way round.
+  const setRange = (which, n) => {
+    let a = which === 'min' ? n : ex.repMin, b = which === 'max' ? n : ex.repMax;
+    if (a > b) { if (which === 'min') b = a; else a = b; }
+    save({ repMin: a, repMax: b });
+  };
+  return html`<div class="field">Progression
+    <div class="seg" role="radiogroup" aria-label="Progression of this exercise">
+      <button role="radio" aria-checked=${!dbl} class=${!dbl ? 'on' : ''} onClick=${() => choose(false)}>Classic</button>
+      <button role="radio" aria-checked=${dbl} class=${dbl ? 'on' : ''} onClick=${() => choose(true)}>Double progression</button>
+    </div>
+  </div>
+  ${dbl ? html`<div class="grid-3">
+      <${IntField} key=${'ds' + ex.id} label="Sets" value=${doubleSets(ex)} onSave=${(n) => save({ dSets: n })} />
+      <${IntField} key=${'rmin' + ex.id} label="Reps from" value=${ex.repMin} onSave=${(n) => setRange('min', n)} />
+      <${IntField} key=${'rmax' + ex.id} label="Reps to" value=${ex.repMax} onSave=${(n) => setRange('max', n)} />
+    </div>`
+    : html`<div class="grid-2">
+      <${IntField} key=${'cs' + ex.id} label="Sets" value=${cs.sets} onSave=${(n) => save({ sets: n })} />
+      <${IntField} key=${'cr' + ex.id} label="Reps" value=${cs.reps} onSave=${(n) => save({ reps: n })} />
+    </div>`}`;
+}
+
+function ExerciseEditor({ ex, inPlans }) {
+  const d = useStore();
   const [name, setName] = useState(ex.name);
   const [setup, setSetup] = useState(ex.setup || '');
-  const [startW, setStartW] = useState(ex.startWeight === null || ex.startWeight === undefined ? '' : signedNum(ex.startWeight));
   const save = (patch) => saveExercise({ ...ex, ...patch });
   const commitName = () => {
     const n = name.trim();
@@ -1968,30 +1930,26 @@ function ExerciseEditor({ ex, inPlans, hasLog }) {
     if (clash) { toast('Another exercise already has this name.'); setName(ex.name); return; }
     if (n !== ex.name) save({ name: n });
   };
-  const commitStart = () => {
-    const v = parseNum(startW);
-    const val = startW.trim() === '' || Number.isNaN(v) || (v < 0 && loadOf(ex) !== 'bodyweight') ? null : round2(v);
-    setStartW(val === null ? '' : signedNum(val));
-    if (val !== (ex.startWeight ?? null)) save({ startWeight: val });
-  };
   const blurOnEnter = (e) => { if (e.key === 'Enter') e.target.blur(); };
   return html`<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line)">
     <label class="field">Name (renames it everywhere, history included)
       <input class="input" value=${name} onInput=${(e) => setName(e.target.value)} onBlur=${commitName} onKeyDown=${blurOnEnter} />
     </label>
-    <div class="field">Equipment
+    <span class="section-label" style="margin: 4px 0 0">Sets and reps</span>
+    <${ProgressionFields} ex=${ex} save=${save} />
+    <span class="section-label" style="margin: 4px 0 0">Weight</span>
+    <${LoadPicker} key=${ex.id} ex=${ex} onChange=${(patch) => save(patch)} />
+    <div class="field">Equipment (+/− steps)
       <div class="seg" role="radiogroup" aria-label="Equipment">
         <button role="radio" aria-checked=${ex.equipment !== 'dumbbell'} class=${ex.equipment !== 'dumbbell' ? 'on' : ''} onClick=${() => save({ equipment: 'machine' })}>Machine / barbell</button>
         <button role="radio" aria-checked=${ex.equipment === 'dumbbell'} class=${ex.equipment === 'dumbbell' ? 'on' : ''} onClick=${() => save({ equipment: 'dumbbell' })}>Dumbbells</button>
       </div>
+      <span class="tiny muted" style="font-weight: 400">${ex.equipment === 'dumbbell'
+        ? '+/− steps: ' + fmtNum(d.settings.stepDbSmall) + ' kg up to ' + fmtNum(d.settings.dbThreshold) + ' kg, then ' + fmtNum(d.settings.stepDbLarge) + ' kg'
+        : '+/− steps: ' + fmtNum(d.settings.stepMachine) + ' kg'}</span>
     </div>
-    <${DoubleSwitch} key=${'dp' + ex.id} ex=${ex} planReps=${(state.plans.flatMap((p) => p.items).find((it) => it.exerciseId === ex.id) || {}).reps || 8} onChange=${(patch) => save(patch)} />
-    <${LoadPicker} key=${ex.id} ex=${ex} onChange=${(patch) => save(patch)} />
-    <label class="field">Starting weight, kg
-      <input class="input" inputmode=${loadOf(ex) === 'bodyweight' ? 'text' : 'decimal'} placeholder="optional" value=${startW} onInput=${(e) => setStartW(e.target.value.replace(loadOf(ex) === 'bodyweight' ? /[^0-9.,\-\u2212]/g : /[^0-9.,]/g, ''))} onBlur=${commitStart} onKeyDown=${blurOnEnter} />
-      <span class="tiny muted" style="font-weight: 400">${hasLog ? 'Already logged: the last weight used is proposed instead.' : 'Proposed the first time you do it, until it has been logged.'}</span>
-    </label>
-    <label class="field">Machine setup
+    <span class="section-label" style="margin: 4px 0 0">More</span>
+    <label class="field">Machine setup (shown with an extra tap)
       <input class="input" placeholder="e.g. seat 4, pad XL" value=${setup} onInput=${(e) => setSetup(e.target.value)} onBlur=${() => { if (setup !== (ex.setup || '')) save({ setup }); }} onKeyDown=${blurOnEnter} />
     </label>
     <${SuggestSwitch} ex=${ex} onChange=${(on) => save({ noSuggest: !on })} />
@@ -2001,58 +1959,67 @@ function ExerciseEditor({ ex, inPlans, hasLog }) {
   </div>`;
 }
 
+// Finds "Machine Low Row" from "mach", "low" or "ow r": any part of the name, capitals ignored.
+const matchesName = (name, q) => name.toLowerCase().includes(q.trim().toLowerCase());
+
 function Exercises() {
   const d = useStore();
   const [openId, setOpenId] = useState(null);
   const [newName, setNewName] = useState('');
+  const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const plans = activePlans(d.plans);
   const inPlans = (id) => plans.filter((p) => p.items.some((it) => it.exerciseId === id)).map((p) => p.name);
   const byName = (a, b) => a.name.localeCompare(b.name);
   const active = d.exercises.filter((e) => !e.archived).sort(byName);
   const archived = d.exercises.filter((e) => e.archived).sort(byName);
+  const shown = query.trim() ? active.filter((e) => matchesName(e.name, query)) : active;
   const create = () => {
     const n = newName.trim();
     if (!n) return;
     if (d.exercises.some((e) => e.name.trim().toLowerCase() === n.toLowerCase())) { toast(n + ' is already in the catalog.'); return; }
-    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, startWeight: null, load: 'total' };
+    const ex = { id: uid(), name: n, equipment: 'machine', setup: '', notes: '', archived: false, load: 'total', sets: 3, reps: 8, dSets: 3 };
     saveExercise(ex);
     setNewName('');
+    setQuery('');
     setOpenId(ex.id);
   };
   return html`<div class="screen">
     <div class="header" style="gap: 6px">
       <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: 'settings' })}><${Icon} name="back" size=${20} sw=${2.2} />Settings</button>
       <h1 class="title">Exercises</h1>
-      <span class="small muted">${active.length} in the catalog. Exercises not in a plan can be added to one, swapped in or added to a workout.</span>
+      <label class="search">
+        <${Icon} name="search" size=${18} sw=${2.2} />
+        <input type="search" enterkeyhint="search" autocomplete="off" autocorrect="off" spellcheck=${false} placeholder="Search exercises" aria-label="Search exercises"
+          value=${query} onInput=${(e) => setQuery(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') e.target.blur(); }} />
+        ${query ? html`<button class="icon-btn" aria-label="Clear the search" onClick=${() => setQuery('')}><${Icon} name="x" size=${18} /></button>` : null}
+      </label>
     </div>
     <div class="main">
-      <div style="display: flex; gap: 8px; align-items: flex-end">
-        <label class="field" style="flex: 1">New exercise
-          <input class="input" placeholder="Name" value=${newName} onInput=${(e) => setNewName(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') create(); }} />
-        </label>
-        <button class="btn btn-primary" onClick=${create}>Add</button>
-      </div>
-      <${ImportButton} label="Add exercises from file" cls="btn" onFile=${addExercisesFromFile} />
-      ${active.map((ex) => {
+      ${query.trim() ? html`<span class="small muted">${shown.length} of ${active.length}</span>` : null}
+      ${shown.map((ex) => {
         const open = openId === ex.id;
         const ps = inPlans(ex.id);
-        const h = exerciseHistory(d.sessions, ex.id);
-        const last = h.length ? h[h.length - 1] : null;
-        const planW = plans.flatMap((p) => p.items).find((it) => it.exerciseId === ex.id && it.weight !== null && it.weight !== undefined);
-        const wTxt = last ? (last.top === 0 ? 'bodyweight' : 'last ' + fmtLoad(last.top, ex))
-          : planW ? 'plan ' + fmtLoad(planW.weight, ex)
-          : ex.startWeight !== null && ex.startWeight !== undefined ? 'start ' + fmtLoad(ex.startWeight, ex) : 'no weight yet';
+        const last = lastDone(d.sessions, ex.id);
+        const wTxt = last ? (last.top === 0 && loadOf(ex) !== 'bodyweight' ? 'bodyweight' : 'last ' + fmtLoad(last.top, ex)) : 'no weight yet';
+        const scheme = ex.double && hasRange(ex) ? 'Double ' + doubleSets(ex) + ' × ' + rangeText(ex) : schemeTextOf(ex, 'classic');
         return html`<div key=${ex.id} class=${'card' + (open ? ' ex-card open' : '')}>
           <button class="ex-head" style="min-height: 60px" aria-expanded=${open} onClick=${() => setOpenId(open ? null : ex.id)}>
             <div class="ex-head-text">
               <span class="ex-name">${ex.name}</span>
-              <span class="small muted">${loadLabel(ex)}${isDoubleEx(ex) ? ' · reps ' + rangeText(ex) : ''} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
+              <span class="small muted">${loadLabel(ex)} · ${scheme} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
             </div>
           </button>
-          ${open ? html`<${ExerciseEditor} key=${ex.id} ex=${ex} inPlans=${ps} hasLog=${!!last} />` : null}
+          ${open ? html`<${ExerciseEditor} key=${ex.id} ex=${ex} inPlans=${ps} />` : null}
         </div>`;
       })}
+      ${query.trim() && !shown.length ? html`<p class="small muted" style="text-align: center; padding: 12px 0">No exercise matches “${query.trim()}”.</p>` : null}
+      <span class="section-label" style="margin-top: 18px">Add</span>
+      <div style="display: flex; gap: 8px">
+        <input class="input" style="flex: 1" placeholder="New exercise name" aria-label="New exercise name" value=${newName} onInput=${(e) => setNewName(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') create(); }} />
+        <button class="btn" onClick=${create}>Add</button>
+      </div>
+      <${ImportButton} label="Add exercises from file" cls="btn" onFile=${addExercisesFromFile} />
       ${archived.length ? html`<button class="btn btn-ghost" onClick=${() => setShowArchived(!showArchived)}>${showArchived ? 'Hide' : 'Show'} archived (${archived.length})</button>` : null}
       ${showArchived ? archived.map((ex) => html`<div key=${ex.id} class="card row">
         <span class="muted">${ex.name}</span>
@@ -2102,6 +2069,22 @@ function Settings() {
   return html`<div class="screen">
     <div class="header"><h1 class="title">Settings</h1></div>
     <div class="main" style="gap: 6px">
+      <span class="section-label">Progression</span>
+      <div class="card card-pad" style="gap: 10px">
+        <div class="seg" role="radiogroup" aria-label="Progression" style="background: var(--bg)">
+          <button role="radio" aria-checked=${s.progression !== 'double'} class=${s.progression !== 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'classic' })}>Classic</button>
+          <button role="radio" aria-checked=${s.progression === 'double'} class=${s.progression === 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'double' })}>Double progression</button>
+        </div>
+        <span class="tiny muted" style="line-height: 1.4">Exercises set to Double progression use their range and their own weights. The others work as in Classic. A workout already open keeps its mode.</span>
+      </div>
+
+      <span class="section-label">Exercises</span>
+      <button class="card row" style="text-align: left; width: 100%" onClick=${() => go({ name: 'exercises' })}>
+        <span style="display: flex; flex-direction: column; gap: 2px"><span>Exercises</span>
+          <span class="tiny muted">${d.exercises.filter((e) => !e.archived).length} in the catalog · sets, reps, progression, weight</span></span>
+        <span class="muted"><${Icon} name="next" size=${20} /></span>
+      </button>
+
       <span class="section-label">You</span>
       <div class="card card-pad" style="gap: 8px">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
@@ -2109,24 +2092,6 @@ function Settings() {
           <span style="display: flex; align-items: center; gap: 6px" class="small muted"><${BodyWeightInput} value=${s.bodyWeight} /> kg</span>
         </div>
         <span class="tiny muted" style="line-height: 1.4">Used for Dips and Pull-ups in volume and total lifted. Each workout keeps the value of the day it starts.</span>
-      </div>
-
-      <span class="section-label">Progression</span>
-      <div class="card card-pad" style="gap: 10px">
-        <div class="seg" role="radiogroup" aria-label="Progression" style="background: var(--bg)">
-          <button role="radio" aria-checked=${s.progression !== 'double'} class=${s.progression !== 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'classic' })}>Classic</button>
-          <button role="radio" aria-checked=${s.progression === 'double'} class=${s.progression === 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'double' })}>Double progression</button>
-        </div>
-        <span class="tiny muted" style="line-height: 1.4">Exercises with Double progression on use their rep range and their own weights. The others work as in Classic. A workout already open keeps its mode.</span>
-      </div>
-
-      <span class="section-label">Rotation</span>
-      <div class="card card-pad" style="gap: 10px">
-        <span style="font-size: 15px; font-weight: 500">Next workout</span>
-        <div class="seg" role="radiogroup" aria-label="Next workout" style="background: var(--bg)">
-          ${plans.map((p) => html`<button key=${p.id} role="radio" aria-checked=${p.id === next} class=${p.id === next ? 'on' : ''} onClick=${() => saveSettings({ nextPlanId: p.id })}>${planName(p)}</button>`)}
-        </div>
-        <span class="tiny muted">Switches automatically after each workout. Change it here only to break the rotation.</span>
       </div>
 
       <span class="section-label">Weight steps (+/−)</span>
@@ -2143,7 +2108,7 @@ function Settings() {
             <${NumberSetting} label="Dumbbell large step in kg" value=${s.stepDbLarge} onSave=${(v) => saveSettings({ stepDbLarge: v })} /> kg
           </div>
         </div>
-        <span class="tiny muted">Each exercise is set to Machine / barbell or Dumbbells in Plans. Tap a weight during a workout to type any value.</span>
+        <span class="tiny muted">Each exercise is set to Machine / barbell or Dumbbells in Exercises. Tap a weight during a workout to type any value.</span>
       </div>
 
       <span class="section-label">Workout and Today</span>
@@ -2154,12 +2119,14 @@ function Settings() {
         </div>`)}
       </div>
 
-      <span class="section-label">Catalog</span>
-      <button class="card row" style="text-align: left; width: 100%" onClick=${() => go({ name: 'exercises' })}>
-        <span style="display: flex; flex-direction: column; gap: 2px"><span>Exercises</span>
-          <span class="tiny muted">${d.exercises.filter((e) => !e.archived).length} in the catalog · add, rename, archive</span></span>
-        <span class="muted"><${Icon} name="next" size=${20} /></span>
-      </button>
+      <span class="section-label">Rotation</span>
+      <div class="card card-pad" style="gap: 10px">
+        <span style="font-size: 15px; font-weight: 500">Next workout</span>
+        <div class="seg" role="radiogroup" aria-label="Next workout" style="background: var(--bg)">
+          ${plans.map((p) => html`<button key=${p.id} role="radio" aria-checked=${p.id === next} class=${p.id === next ? 'on' : ''} onClick=${() => saveSettings({ nextPlanId: p.id })}>${planName(p)}</button>`)}
+        </div>
+        <span class="tiny muted">Switches automatically after each workout. Change it here only to break the rotation.</span>
+      </div>
 
       <span class="section-label">Data</span>
       <div class="card card-pad" style="gap: 10px">
@@ -2228,11 +2195,11 @@ async function boot() {
       }
     }
     const open = data.sessions.find((s) => !s.finishedAt);
-    const set = data.plans.length || data.exercises.length ? await setUpLoadsOnce(data.exercises, settings) : { exercises: data.exercises, settings };
+    const set = data.plans.length || data.exercises.length ? await upgradeData(data.exercises, data.plans, settings) : { exercises: data.exercises, plans: data.plans, settings };
     setState({
       loaded: true,
       exercises: set.exercises,
-      plans: data.plans,
+      plans: set.plans,
       sessions: data.sessions,
       settings: set.settings,
       // Reopen a workout left open (e.g. after the app was closed mid-session).

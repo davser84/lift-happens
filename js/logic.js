@@ -18,8 +18,10 @@ export const DEFAULT_SETTINGS = {
   bodyWeightFirstDay: null,
   // 1.9.0: how each exercise logs its weight was set up once, by name (see setUpLoads).
   loadsSetUp: false,
-  // 1.10.0: 'classic' (sets × reps from the plan) or 'double' (rep range first, then weight).
-  progression: 'classic'
+  // 1.10.0: 'classic' (sets × reps) or 'double' (rep range first, then weight).
+  progression: 'classic',
+  // 1.11.0: sets and reps moved from the plans to the exercises (see moveSchemes).
+  schemesMoved: false
 };
 
 export function uid() {
@@ -136,7 +138,7 @@ export function setUpLoads(exercises) {
   }
   const added = [];
   if (!names.has('smith machine squat') && !exercises.some((e) => e.id === 'smith_squat')) {
-    added.push({ id: 'smith_squat', name: 'Smith Machine Squat', equipment: 'machine', setup: '', notes: '', archived: false, startWeight: null, noSuggest: false, load: 'plates', bar: 13.6 });
+    added.push({ id: 'smith_squat', name: 'Smith Machine Squat', equipment: 'machine', setup: '', notes: '', archived: false, noSuggest: false, load: 'plates', bar: 13.6, sets: 3, reps: 8, dSets: 3 });
   }
   return { changed, added };
 }
@@ -207,34 +209,48 @@ function startReps(count, reps, from, opts) {
   return spread([opts.range.min], count);
 }
 
-// Starting sets for a plan item, following the spec's four-step rule.
-export function startingSets(item, sessions, opts = {}) {
-  const count = Math.max(1, item.sets || 1);
-  const from = startFrom(sessions, item.exerciseId, opts);
-  const prev = from.prev;
-  const planW = item.weight === null || item.weight === undefined ? null : item.weight;
-  let weights;
-  if (planW !== null && (!prev || ts(item.weightEditedAt) > prev.time)) {
-    weights = spread([planW], count);
-  } else if (prev) {
-    weights = spread(prev.entry.sets.map((x) => x.weight), count);
-  } else if (planW !== null) {
-    weights = spread([planW], count);
-  } else {
-    // Never logged and no plan weight: the exercise's starting weight, if it has one.
-    weights = spread(opts.fallbackWeight === null || opts.fallbackWeight === undefined ? [] : [opts.fallbackWeight], count);
-  }
-  const reps = startReps(count, item.reps, from, opts);
-  return weights.map((w, i) => ({ weight: w, reps: reps[i] }));
-}
-
-// Starting sets for an exercise that is not (or no longer) the plan item: swap or add.
+// Starting sets for an exercise: weights from its last time (in the same mode when it keeps Classic and
+// Double apart), else empty, to be entered at the gym; reps per the mode (see startReps).
 export function setsFromHistory(exerciseId, count, reps, sessions, opts = {}) {
   const from = startFrom(sessions, exerciseId, opts);
-  const fb = opts.fallbackWeight === null || opts.fallbackWeight === undefined ? [] : [opts.fallbackWeight];
-  const weights = from.prev ? spread(from.prev.entry.sets.map((x) => x.weight), count) : spread(fb, count);
+  const weights = from.prev ? spread(from.prev.entry.sets.map((x) => x.weight), count) : spread([], count);
   const r = startReps(count, reps, from, opts);
   return weights.map((w, i) => ({ weight: w, reps: r[i] }));
+}
+// Starting sets of an exercise with its own sets × reps (or sets × range) for the mode in opts.
+export function startSets(ex, sessions, opts = {}) {
+  const sc = opts.mode === 'double' ? { sets: doubleSets(ex), reps: ex.repMin } : classicScheme(ex);
+  return setsFromHistory(ex.id, sc.sets, sc.reps, sessions, opts);
+}
+
+// ---------- what each exercise does: sets and reps (Classic), sets and range (Double) ----------
+
+const posInt = (v, d) => { const n = parseInt(v, 10); return n >= 1 ? n : d; };
+export const classicScheme = (ex) => ({ sets: posInt(ex && ex.sets, 3), reps: posInt(ex && ex.reps, 8) });
+export const doubleSets = (ex) => posInt(ex && (ex.dSets ?? ex.sets), 3);
+// "3 × 8", or "3 × 6–10" for an exercise done in Double progression in a workout of that mode.
+export function schemeTextOf(ex, sessionMode) {
+  if (entryMode(sessionMode, ex) === 'double') return doubleSets(ex) + ' × ' + ex.repMin + '–' + ex.repMax;
+  const sc = classicScheme(ex);
+  return sc.sets + ' × ' + sc.reps;
+}
+
+// 1.11.0, once: sets and reps move from the plans to the exercises (the first plan wins when two
+// differ; 3 × 8 for an exercise in no plan); plan weights and starting weights are dropped.
+// Plans keep only which exercises, in which order.
+export function moveSchemes(exercises, plans) {
+  const ordered = activePlans(plans).concat(plans.filter((p) => p.archived));
+  const first = {};
+  for (const p of ordered) for (const it of p.items || []) if (!first[it.exerciseId] && it.sets) first[it.exerciseId] = it;
+  const exOut = exercises.map((ex) => {
+    const it = first[ex.id];
+    const sets = posInt(ex.sets ?? (it && it.sets), 3);
+    const out = { ...ex, sets, reps: posInt(ex.reps ?? (it && it.reps), 8), dSets: posInt(ex.dSets, sets) };
+    delete out.startWeight;
+    return out;
+  });
+  const plansOut = plans.map((p) => ({ ...p, items: (p.items || []).map((it) => ({ id: it.id, exerciseId: it.exerciseId })) }));
+  return { exercises: exOut, plans: plansOut };
 }
 
 // ---------- double progression ----------
@@ -278,7 +294,6 @@ export function doubleReady(sessions, entry, ex, currentSessionId) {
 export function createSession(plan, sessions, now = new Date(), exercisesById = {}, mode = 'classic') {
   const id = uid();
   const sessionMode = mode === 'double' ? 'double' : 'classic';
-  const startW = (exId) => (exercisesById[exId] ? exercisesById[exId].startWeight : null);
   return {
     id,
     planId: plan.id,
@@ -287,8 +302,9 @@ export function createSession(plan, sessions, now = new Date(), exercisesById = 
     note: '',
     mode: sessionMode,
     entries: plan.items.map((item, i) => {
-      const ex = exercisesById[item.exerciseId];
-      const so = startOpts(sessionMode, ex, { excludeSessionId: id, fallbackWeight: startW(item.exerciseId) });
+      const ex = exercisesById[item.exerciseId] || { id: item.exerciseId };
+      const so = startOpts(sessionMode, ex, { excludeSessionId: id });
+      const sets = startSets(ex, sessions, so);
       return {
         id: uid(),
         order: i,
@@ -298,10 +314,10 @@ export function createSession(plan, sessions, now = new Date(), exercisesById = 
         replacesExerciseId: null,
         status: 'open',
         doneAt: null,
-        plannedSets: item.sets,
+        plannedSets: sets.length,
         reminder: null,
         mode: so.mode,
-        sets: startingSets(item, sessions, so)
+        sets
       };
     })
   };
@@ -349,16 +365,9 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
     // exercise keeps Classic and Double apart.
     const mode = modeOf(e);
     const cmp = isDoubleEx(ex) ? exerciseHistory(sessions, e.exerciseId, { ...opts, mode }) : hist;
-    let prev = cmp.length ? cmp[cmp.length - 1] : null;
-    let vsPlan = false;
-    // First time ever: compare with the plan's starting weight, if it has one.
-    if (!prev && e.kind === 'planned' && plan) {
-      const item = plan.items.find((it) => it.id === e.planItemId);
-      if (item && item.weight !== null && item.weight !== undefined) {
-        prev = { top: item.weight, totalReps: item.sets * item.reps, volume: item.weight * item.reps * item.sets };
-        vsPlan = true;
-      }
-    }
+    // First time in this mode: the last time in the other mode (where its weights came from).
+    const prev = cmp.length ? cmp[cmp.length - 1] : hist.length ? hist[hist.length - 1] : null;
+    const vsPlan = false;
     const weights = e.sets.map((x) => x.weight || 0);
     const top = Math.max.apply(null, weights);
     const totalReps = e.sets.reduce((a, x) => a + (x.reps || 0), 0);
@@ -417,14 +426,6 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
     for (const e of done) hereBy[e.exerciseId] = (hereBy[e.exerciseId] || 0) + volOf(e, session);
     for (const k of Object.keys(hereBy)) if (k in prevBy) { volLast += prevBy[k]; volToday += hereBy[k]; }
     volBase = 'previous';
-  } else if (plan) {
-    for (const e of done) {
-      const item = e.kind === 'planned' ? plan.items.find((it) => it.id === e.planItemId) : null;
-      if (!item || item.weight === null || item.weight === undefined) continue;
-      volLast += realLoad(item.weight, exercisesById[e.exerciseId], bwOf(session)) * item.reps * item.sets;
-      volToday += volOf(e, session);
-    }
-    if (volLast > 0) volBase = 'plan';
   }
   return {
     rows,
@@ -456,18 +457,20 @@ export function previousSameType(session, sessions) {
 // When an exercise is confirmed with a different number of sets, or with the same reps in every set
 // but a different number than the plan, returns { from, to } to offer updating the plan; else null.
 // Uneven reps (e.g. 8, 8, 6) are a tired last set, not a new scheme: then only the set count counts.
-export function schemeChange(entry, item) {
-  if (!entry || !item || entry.kind !== 'planned' || !entry.sets || !entry.sets.length) return null;
+export function schemeChange(entry, ex) {
+  if (!entry || !ex || entry.kind !== 'planned' || !entry.sets || !entry.sets.length) return null;
   // Double progression: reps move inside the range every time; only a different set count is asked about.
   if (modeOf(entry) === 'double') {
-    if (entry.sets.length === item.sets) return null;
-    return { from: { sets: item.sets, reps: item.reps }, to: { sets: entry.sets.length, reps: item.reps }, setsOnly: true };
+    const n = doubleSets(ex);
+    if (entry.sets.length === n) return null;
+    return { from: { sets: n, reps: ex.repMin }, to: { sets: entry.sets.length, reps: ex.repMin }, setsOnly: true };
   }
+  const sc = classicScheme(ex);
   const reps = entry.sets[0].reps;
   const even = entry.sets.every((x) => x.reps === reps);
-  const to = { sets: entry.sets.length, reps: even ? reps : item.reps };
-  if (to.sets === item.sets && to.reps === item.reps) return null;
-  return { from: { sets: item.sets, reps: item.reps }, to };
+  const to = { sets: entry.sets.length, reps: even ? reps : sc.reps };
+  if (to.sets === sc.sets && to.reps === sc.reps) return null;
+  return { from: { sets: sc.sets, reps: sc.reps }, to };
 }
 
 // ---------- automatic suggestion: more weight ----------
@@ -476,8 +479,8 @@ export function schemeChange(entry, item) {
 // weights set by set and every planned set was done with at least the plan's reps.
 // Never for an exercise switched off, a bodyweight one, a swapped or added one, or once today's
 // weight is already higher than last time.
-export function suggestIncrease(sessions, entry, item, exercise, currentSessionId) {
-  if (!entry || !item || entry.kind !== 'planned' || entry.status !== 'open') return false;
+export function suggestIncrease(sessions, entry, exercise, currentSessionId) {
+  if (!entry || !exercise || entry.kind !== 'planned' || entry.status !== 'open') return false;
   if (modeOf(entry) === 'double') return false;
   if (exercise && exercise.noSuggest) return false;
   const h = exerciseHistory(sessions, entry.exerciseId, { excludeSessionId: currentSessionId, ...(isDoubleEx(exercise) ? { mode: 'classic' } : {}) });
@@ -488,7 +491,8 @@ export function suggestIncrease(sessions, entry, item, exercise, currentSessionI
   const lastTop = Math.max.apply(null, wb);
   if (lastTop <= 0) return false;
   if (wa.length !== wb.length || wa.some((w, i) => w !== wb[i])) return false;
-  const full = (e) => e.sets.length >= item.sets && e.sets.every((x) => (x.reps || 0) >= item.reps);
+  const sc = classicScheme(exercise);
+  const full = (e) => e.sets.length >= sc.sets && e.sets.every((x) => (x.reps || 0) >= sc.reps);
   if (!full(a.entry) || !full(b.entry)) return false;
   const nowTop = Math.max.apply(null, entry.sets.map((x) => x.weight || 0));
   return !(nowTop > lastTop);
@@ -764,6 +768,7 @@ function loadFields(e) {
   const min = parseInt(e.repMin, 10), max = parseInt(e.repMax, 10);
   if (min >= 1 && max >= min) { out.repMin = min; out.repMax = max; }
   if (e.double && out.repMin) out.double = true;
+  for (const k of ['sets', 'reps', 'dSets']) { const n = parseInt(e[k], 10); if (n >= 1) out[k] = n; }
   return out;
 }
 
@@ -780,9 +785,10 @@ export function mergeExercisesFile(data, existing) {
     if (names.has(normName(name)) || (e.id && ids.has(e.id))) { skipped.push(name); continue; }
     const ex = {
       id: e.id || uid(), name, equipment: e.equipment === 'dumbbell' ? 'dumbbell' : 'machine',
-      setup: e.setup || '', notes: e.notes || '', archived: false, startWeight: numOrNull(e.startWeight),
-      noSuggest: !!e.noSuggest, ...loadFields(e)
+      setup: e.setup || '', notes: e.notes || '', archived: false, noSuggest: !!e.noSuggest, sets: 3, reps: 8,
+      ...loadFields(e)
     };
+    if (!ex.dSets) ex.dSets = ex.sets;
     names.add(normName(name)); ids.add(ex.id);
     added.push(ex);
   }
@@ -802,15 +808,14 @@ export function validateImport(data) {
     exercises: data.exercises.map((e) => ({
       id: e.id, name: String(e.name), equipment: e.equipment === 'dumbbell' ? 'dumbbell' : 'machine',
       setup: e.setup || '', notes: e.notes || '', archived: !!e.archived,
-      startWeight: numOrNull(e.startWeight), noSuggest: !!e.noSuggest, ...loadFields(e)
+      noSuggest: !!e.noSuggest, ...loadFields(e)
     })),
     plans: data.plans.map((p, i) => ({
       id: p.id, name: String(p.name), order: typeof p.order === 'number' ? p.order : i, archived: !!p.archived,
+      // Files from before 1.11.0 still carry sets and reps here: moveSchemes moves them to the exercises.
       items: p.items.map((it) => ({
         id: it.id || uid(), exerciseId: it.exerciseId,
-        sets: Math.max(1, parseInt(it.sets, 10) || 1), reps: Math.max(1, parseInt(it.reps, 10) || 1),
-        weight: it.weight === null || it.weight === undefined || it.weight === '' ? null : Number(it.weight),
-        weightEditedAt: it.weightEditedAt || null
+        ...(parseInt(it.sets, 10) >= 1 ? { sets: parseInt(it.sets, 10), reps: Math.max(1, parseInt(it.reps, 10) || 8) } : {})
       }))
     })),
     sessions: Array.isArray(data.sessions) ? data.sessions : [],
