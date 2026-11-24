@@ -17,7 +17,9 @@ export const DEFAULT_SETTINGS = {
   bodyWeightFirst: null,
   bodyWeightFirstDay: null,
   // 1.9.0: how each exercise logs its weight was set up once, by name (see setUpLoads).
-  loadsSetUp: false
+  loadsSetUp: false,
+  // 1.10.0: 'classic' (sets × reps from the plan) or 'double' (rep range first, then weight).
+  progression: 'classic'
 };
 
 export function uid() {
@@ -154,6 +156,7 @@ export function exerciseHistory(sessions, exerciseId, opts = {}) {
     if (opts.before && ts(s.startedAt) >= opts.before) continue;
     for (const e of s.entries || []) {
       if (e.exerciseId !== exerciseId || e.status !== 'done' || !e.sets || !e.sets.length) continue;
+      if (opts.mode && modeOf(e) !== opts.mode) continue;
       const weights = e.sets.map((x) => (x.weight === null || x.weight === undefined ? 0 : x.weight));
       out.push({
         session: s,
@@ -185,10 +188,30 @@ function spread(weights, count) {
   return out;
 }
 
+// The last done entry whose values an exercise starts from. An exercise with Double progression
+// switched on keeps Classic and Double apart (opts.split): each mode starts from its own last time,
+// and falls back to the other one (weights only) when it has none yet.
+function startFrom(sessions, exerciseId, opts) {
+  const base = { excludeSessionId: opts.excludeSessionId, before: opts.before };
+  if (!opts.split) return { prev: lastDone(sessions, exerciseId, base), own: true };
+  const mode = opts.mode === 'double' ? 'double' : 'classic';
+  const own = lastDone(sessions, exerciseId, { ...base, mode });
+  if (own) return { prev: own, own: true };
+  return { prev: mode === 'double' ? lastDone(sessions, exerciseId, { ...base, mode: 'classic' }) : lastDone(sessions, exerciseId, base), own: false };
+}
+// Reps to start from: Classic = the plan's (or the given) reps; Double = last time in Double set by set,
+// or the bottom of the range the first time.
+function startReps(count, reps, from, opts) {
+  if (opts.mode !== 'double' || !opts.range) return spread([reps], count);
+  if (from.own && from.prev) return spread(from.prev.entry.sets.map((x) => x.reps), count);
+  return spread([opts.range.min], count);
+}
+
 // Starting sets for a plan item, following the spec's four-step rule.
 export function startingSets(item, sessions, opts = {}) {
   const count = Math.max(1, item.sets || 1);
-  const prev = lastDone(sessions, item.exerciseId, opts);
+  const from = startFrom(sessions, item.exerciseId, opts);
+  const prev = from.prev;
   const planW = item.weight === null || item.weight === undefined ? null : item.weight;
   let weights;
   if (planW !== null && (!prev || ts(item.weightEditedAt) > prev.time)) {
@@ -201,20 +224,60 @@ export function startingSets(item, sessions, opts = {}) {
     // Never logged and no plan weight: the exercise's starting weight, if it has one.
     weights = spread(opts.fallbackWeight === null || opts.fallbackWeight === undefined ? [] : [opts.fallbackWeight], count);
   }
-  return weights.map((w) => ({ weight: w, reps: item.reps }));
+  const reps = startReps(count, item.reps, from, opts);
+  return weights.map((w, i) => ({ weight: w, reps: reps[i] }));
 }
 
 // Starting sets for an exercise that is not (or no longer) the plan item: swap or add.
 export function setsFromHistory(exerciseId, count, reps, sessions, opts = {}) {
-  const prev = lastDone(sessions, exerciseId, opts);
+  const from = startFrom(sessions, exerciseId, opts);
   const fb = opts.fallbackWeight === null || opts.fallbackWeight === undefined ? [] : [opts.fallbackWeight];
-  const weights = prev ? spread(prev.entry.sets.map((x) => x.weight), count) : spread(fb, count);
-  return weights.map((w) => ({ weight: w, reps: reps }));
+  const weights = from.prev ? spread(from.prev.entry.sets.map((x) => x.weight), count) : spread(fb, count);
+  const r = startReps(count, reps, from, opts);
+  return weights.map((w, i) => ({ weight: w, reps: r[i] }));
 }
 
-export function createSession(plan, sessions, now = new Date(), exercisesById = {}) {
+// ---------- double progression ----------
+
+export const PROGRESSIONS = ['classic', 'double'];
+export const hasRange = (ex) => !!ex && Number.isInteger(ex.repMin) && Number.isInteger(ex.repMax) && ex.repMin >= 1 && ex.repMax >= ex.repMin;
+// Double progression switched on for the exercise, with a valid range.
+export const isDoubleEx = (ex) => !!(ex && ex.double && hasRange(ex));
+export const rangeOf = (ex) => (hasRange(ex) ? { min: ex.repMin, max: ex.repMax } : null);
+export const rangeText = (ex) => (hasRange(ex) ? ex.repMin + '–' + ex.repMax : '');
+export const modeOf = (entry) => (entry && entry.mode === 'double' ? 'double' : 'classic');
+// The mode an exercise is done in, in a workout of the given mode.
+export const entryMode = (sessionMode, ex) => (sessionMode === 'double' && isDoubleEx(ex) ? 'double' : 'classic');
+// Options for starting values of one exercise in a workout of the given mode.
+export function startOpts(sessionMode, ex, base = {}) {
+  const mode = entryMode(sessionMode, ex);
+  return { ...base, mode, split: isDoubleEx(ex), range: mode === 'double' ? rangeOf(ex) : null };
+}
+// A range to start from when Double progression is switched on, from the plan's reps.
+export function defaultRange(reps) {
+  if (!reps || reps <= 8) return { min: 6, max: 10 };
+  if (reps <= 12) return { min: 10, max: 15 };
+  return { min: 12, max: 20 };
+}
+// Every set at the top of the range (Double only).
+export function atTop(entry, ex) {
+  if (modeOf(entry) !== 'double' || !hasRange(ex) || !entry.sets || !entry.sets.length) return false;
+  return entry.sets.every((x) => (x.reps || 0) >= ex.repMax);
+}
+// Last time in Double every set reached the top of the range: time for more weight. Only a reminder:
+// the weights never change by themselves. Hidden once today's weight is above last time.
+export function doubleReady(sessions, entry, ex, currentSessionId) {
+  if (!entry || modeOf(entry) !== 'double' || entry.status !== 'open' || !hasRange(ex)) return null;
+  const prev = lastDone(sessions, entry.exerciseId, { excludeSessionId: currentSessionId, mode: 'double' });
+  if (!prev || !prev.entry.sets.every((x) => (x.reps || 0) >= ex.repMax)) return null;
+  const nowTop = Math.max.apply(null, entry.sets.map((x) => (x.weight === null || x.weight === undefined ? -Infinity : x.weight)));
+  if (nowTop > prev.top) return null;
+  return { last: prev, max: ex.repMax };
+}
+
+export function createSession(plan, sessions, now = new Date(), exercisesById = {}, mode = 'classic') {
   const id = uid();
-  const opts = { excludeSessionId: id };
+  const sessionMode = mode === 'double' ? 'double' : 'classic';
   const startW = (exId) => (exercisesById[exId] ? exercisesById[exId].startWeight : null);
   return {
     id,
@@ -222,19 +285,25 @@ export function createSession(plan, sessions, now = new Date(), exercisesById = 
     startedAt: now.toISOString(),
     finishedAt: null,
     note: '',
-    entries: plan.items.map((item, i) => ({
-      id: uid(),
-      order: i,
-      exerciseId: item.exerciseId,
-      planItemId: item.id,
-      kind: 'planned',
-      replacesExerciseId: null,
-      status: 'open',
-      doneAt: null,
-      plannedSets: item.sets,
-      reminder: null,
-      sets: startingSets(item, sessions, { ...opts, fallbackWeight: startW(item.exerciseId) })
-    }))
+    mode: sessionMode,
+    entries: plan.items.map((item, i) => {
+      const ex = exercisesById[item.exerciseId];
+      const so = startOpts(sessionMode, ex, { excludeSessionId: id, fallbackWeight: startW(item.exerciseId) });
+      return {
+        id: uid(),
+        order: i,
+        exerciseId: item.exerciseId,
+        planItemId: item.id,
+        kind: 'planned',
+        replacesExerciseId: null,
+        status: 'open',
+        doneAt: null,
+        plannedSets: item.sets,
+        reminder: null,
+        mode: so.mode,
+        sets: startingSets(item, sessions, so)
+      };
+    })
   };
 }
 
@@ -270,13 +339,17 @@ export function plannedPlanId(plans, settings) {
 export function sessionSummary(session, sessions, exercisesById, plan = null, opts0 = {}) {
   const before = ts(session.startedAt);
   const opts = { excludeSessionId: session.id, before };
-  let volLast = 0, volToday = 0, heavier = 0, lighter = 0, same = 0, records = 0;
+  let volLast = 0, volToday = 0, heavier = 0, lighter = 0, same = 0, records = 0, moreReps = 0, fewerReps = 0;
   const rows = [];
   for (const e of session.entries) {
     if (e.status !== 'done') continue;
     const ex = exercisesById[e.exerciseId];
     const hist = exerciseHistory(sessions, e.exerciseId, opts);
-    let prev = hist.length ? hist[hist.length - 1] : null;
+    // Records count every workout; the comparison uses the last time in the same mode when the
+    // exercise keeps Classic and Double apart.
+    const mode = modeOf(e);
+    const cmp = isDoubleEx(ex) ? exerciseHistory(sessions, e.exerciseId, { ...opts, mode }) : hist;
+    let prev = cmp.length ? cmp[cmp.length - 1] : null;
     let vsPlan = false;
     // First time ever: compare with the plan's starting weight, if it has one.
     if (!prev && e.kind === 'planned' && plan) {
@@ -290,10 +363,14 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
     const top = Math.max.apply(null, weights);
     const totalReps = e.sets.reduce((a, x) => a + (x.reps || 0), 0);
     const bodyweight = top === 0 && (!prev || prev.top === 0);
-    let delta = null;
+    let delta = null, repsDelta = null;
     if (prev) {
       delta = bodyweight ? totalReps - prev.totalReps : round2(top - prev.top);
-      if (delta > 0) heavier++; else if (delta < 0) lighter++; else same++;
+      // Double progression: same weight, more reps is progress too.
+      if (mode === 'double' && !bodyweight && delta === 0) repsDelta = totalReps - prev.totalReps;
+      if (repsDelta > 0) moreReps++;
+      else if (repsDelta < 0) fewerReps++;
+      else if (delta > 0) heavier++; else if (delta < 0) lighter++; else same++;
     }
     let record = null;
     if (hist.length) {
@@ -322,6 +399,10 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
       totalReps,
       prevReps: prev ? prev.totalReps : null,
       delta,
+      mode,
+      repsDelta,
+      range: mode === 'double' ? rangeText(ex) : '',
+      atTop: atTop(e, ex),
       record
     });
   }
@@ -352,7 +433,8 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
     volBase,
     volPrev: prevSame ? { id: prevSame.id, startedAt: prevSame.startedAt } : null,
     volPct: volLast > 0 ? (volToday / volLast - 1) * 100 : null,
-    heavier, lighter, same, records,
+    heavier, lighter, same, records, moreReps, fewerReps,
+    mode: session.mode === 'double' ? 'double' : 'classic',
     setsLogged: done.reduce((a, e) => a + e.sets.length, 0),
     skipped: session.entries.filter((e) => e.status === 'skipped').length
   };
@@ -376,6 +458,11 @@ export function previousSameType(session, sessions) {
 // Uneven reps (e.g. 8, 8, 6) are a tired last set, not a new scheme: then only the set count counts.
 export function schemeChange(entry, item) {
   if (!entry || !item || entry.kind !== 'planned' || !entry.sets || !entry.sets.length) return null;
+  // Double progression: reps move inside the range every time; only a different set count is asked about.
+  if (modeOf(entry) === 'double') {
+    if (entry.sets.length === item.sets) return null;
+    return { from: { sets: item.sets, reps: item.reps }, to: { sets: entry.sets.length, reps: item.reps }, setsOnly: true };
+  }
   const reps = entry.sets[0].reps;
   const even = entry.sets.every((x) => x.reps === reps);
   const to = { sets: entry.sets.length, reps: even ? reps : item.reps };
@@ -391,8 +478,9 @@ export function schemeChange(entry, item) {
 // weight is already higher than last time.
 export function suggestIncrease(sessions, entry, item, exercise, currentSessionId) {
   if (!entry || !item || entry.kind !== 'planned' || entry.status !== 'open') return false;
+  if (modeOf(entry) === 'double') return false;
   if (exercise && exercise.noSuggest) return false;
-  const h = exerciseHistory(sessions, entry.exerciseId, { excludeSessionId: currentSessionId });
+  const h = exerciseHistory(sessions, entry.exerciseId, { excludeSessionId: currentSessionId, ...(isDoubleEx(exercise) ? { mode: 'classic' } : {}) });
   if (h.length < 2) return false;
   const [a, b] = h.slice(-2);
   const wa = a.entry.sets.map((x) => x.weight || 0);
@@ -666,11 +754,16 @@ export const agoText = (days) => (days <= 0 ? 'today' : days === 1 ? 'yesterday'
 const numOrNull = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 const normName = (n) => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
-// The load type of an exercise in a file, when it has one.
+// The load type and the Double progression range of an exercise in a file, when it has them.
 function loadFields(e) {
-  if (!LOADS.includes(e.load)) return {};
-  const out = { load: e.load };
-  if (e.load === 'plates') out.bar = numOrNull(e.bar) ?? 20;
+  const out = {};
+  if (LOADS.includes(e.load)) {
+    out.load = e.load;
+    if (e.load === 'plates') out.bar = numOrNull(e.bar) ?? 20;
+  }
+  const min = parseInt(e.repMin, 10), max = parseInt(e.repMax, 10);
+  if (min >= 1 && max >= min) { out.repMin = min; out.repMax = max; }
+  if (e.double && out.repMin) out.double = true;
   return out;
 }
 

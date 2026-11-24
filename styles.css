@@ -300,3 +300,18 @@ h1, h2, h3, p { margin: 0; }
 .load-other { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-2); font-weight: 500; }
 .load-other .input { width: 80px; text-align: center; }
 .record svg { flex-shrink: 0; }
+
+/* 1.10.0 — double progression */
+.mode-tag { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.mode-tag.double { border-color: rgba(52,199,123,0.55); color: var(--go); }
+.dp-box { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(52,199,123,0.55); background: rgba(52,199,123,0.10); color: var(--text); font-size: 14px; line-height: 1.4; }
+.dp-box svg { color: var(--go); flex-shrink: 0; margin-top: 1px; }
+.dp-last { color: var(--text-2); padding-left: 2px; }
+.stepper.rep-max { border-color: rgba(52,199,123,0.55); }
+.stepper.rep-max .step-field { color: var(--go); }
+.stepper.rep-low .step-field { color: var(--warn, #F5A524); }
+.dp-switch { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 12px; }
+.dp-switch.on { border-color: rgba(52,199,123,0.45); background: rgba(52,199,123,0.06); }
+.dp-range { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--text-2); }
+.dp-range .input { width: 64px; text-align: center; font-weight: 700; }
+.sum-row.no-bar { grid-template-columns: minmax(0, 1fr) auto; }

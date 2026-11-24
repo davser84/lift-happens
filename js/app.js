@@ -7,12 +7,13 @@ import {
   validateImport, buildExport, pickDailyQuote, localDayKey,
   pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange,
   suggestIncrease, backupDue, daysSinceBackup, weeksInARow, computeMilestones, liftedComparison, sessionVolume,
-  loadOf, barOf, BARS, fmtLoad, signedNum, loadLabel, setUpLoads, MOODS, sessionDataText, thisWeek, closestMilestone, daysBetween, agoText
+  loadOf, barOf, BARS, fmtLoad, signedNum, loadLabel, setUpLoads, MOODS, sessionDataText, thisWeek, closestMilestone, daysBetween, agoText,
+  isDoubleEx, hasRange, rangeText, modeOf, entryMode, startOpts, defaultRange, atTop, doubleReady, lastDone
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.9.1';
+const VERSION = '1.10.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -450,7 +451,7 @@ function Home() {
   const start = () => {
     if (!plan) return;
     if (!plan.items.length) { toast('This plan has no exercises yet. Add some in Plans.'); return; }
-    const s = { ...createSession(plan, d.sessions, new Date(), exMap()), bodyWeight: d.settings.bodyWeight ?? null };
+    const s = { ...createSession(plan, d.sessions, new Date(), exMap(), d.settings.progression), bodyWeight: d.settings.bodyWeight ?? null };
     saveSession(s);
     go({ name: 'workout', id: s.id });
   };
@@ -606,6 +607,9 @@ function Workout({ id }) {
   const settings = d.settings;
   const entries = session.entries.slice().sort((a, b) => a.order - b.order);
   const opts = { excludeSessionId: id };
+  const sessionMode = session.mode === 'double' ? 'double' : 'classic';
+  // Starting values of one exercise in this workout's mode (Classic and Double kept apart).
+  const optsFor = (exId) => startOpts(sessionMode, exById[exId], { ...opts, fallbackWeight: (exById[exId] || {}).startWeight });
 
   // Always patch the latest copy, so quick taps never overwrite each other.
   const patchEntries = (fn) => {
@@ -641,6 +645,8 @@ function Workout({ id }) {
     });
     clearEdit();
     if (!fromSwipe) setOpenId(settings.autoAdvance ? after : null);
+    const exDone = exById[e.exerciseId];
+    if (atTop(e, exDone)) toast(exDone.name + ': all sets at ' + exDone.repMax + '. Next time: more weight.');
     // Different sets or reps than the plan: offer to update the plan (asked again only if they change again).
     const curPlan = state.plans.find((p) => p.id === getSession(id).planId);
     const item = curPlan ? curPlan.items.find((it) => it.id === e.planItemId) : null;
@@ -662,11 +668,12 @@ function Workout({ id }) {
     setPlanAsk(null);
     if (!a) return;
     const label = schemeLabel(a.to);
-    patchEntry(a.entryId, (x) => (update ? { ...x, plannedSets: a.to.sets, appliedScheme: label, planAsked: label } : { ...x, planAsked: label }));
+    const shown = a.setsOnly ? a.to.sets + ' sets' : label;
+    patchEntry(a.entryId, (x) => (update ? { ...x, plannedSets: a.to.sets, appliedScheme: a.setsOnly ? null : label, planAsked: label } : { ...x, planAsked: label }));
     const cur = update ? state.plans.find((p) => p.id === getSession(id).planId) : null;
     if (cur) {
       savePlan({ ...cur, items: cur.items.map((it) => (it.id === a.itemId ? { ...it, sets: a.to.sets, reps: a.to.reps } : it)) });
-      toast(planName(cur) + ' updated: ' + a.name + ' is now ' + label + '.');
+      toast(planName(cur) + ' updated: ' + a.name + ' is now ' + shown + '.');
     }
     if (finishAfterAsk.current) { finishAfterAsk.current = false; autoFinish(); }
   };
@@ -701,8 +708,8 @@ function Workout({ id }) {
       return {
         ...e, kind: 'swapped', status: 'open', doneAt: null,
         replacesExerciseId: e.kind === 'swapped' ? e.replacesExerciseId : e.exerciseId,
-        exerciseId: exId, plannedSets: count, appliedScheme: null,
-        sets: setsFromHistory(exId, count, reps, state.sessions, { ...opts, fallbackWeight: (exById[exId] || {}).startWeight })
+        exerciseId: exId, plannedSets: count, appliedScheme: null, mode: entryMode(sessionMode, exById[exId]),
+        sets: setsFromHistory(exId, count, reps, state.sessions, optsFor(exId))
       };
     });
     setOpenId(entryId);
@@ -712,10 +719,10 @@ function Workout({ id }) {
     const item = planItemOf(e);
     patchEntry(e.id, (x) => ({
       ...x, kind: 'planned', exerciseId: x.replacesExerciseId, replacesExerciseId: null, status: 'open', doneAt: null,
-      plannedSets: item ? item.sets : x.plannedSets, appliedScheme: null,
+      plannedSets: item ? item.sets : x.plannedSets, appliedScheme: null, mode: entryMode(sessionMode, exById[x.replacesExerciseId]),
       sets: item
-        ? startingSets(item, state.sessions, { ...opts, fallbackWeight: (exById[x.replacesExerciseId] || {}).startWeight })
-        : setsFromHistory(x.replacesExerciseId, x.sets.length, x.sets[0].reps, state.sessions, { ...opts, fallbackWeight: (exById[x.replacesExerciseId] || {}).startWeight })
+        ? startingSets(item, state.sessions, optsFor(x.replacesExerciseId))
+        : setsFromHistory(x.replacesExerciseId, x.sets.length, x.sets[0].reps, state.sessions, optsFor(x.replacesExerciseId))
     }));
   };
 
@@ -726,7 +733,8 @@ function Workout({ id }) {
       const order = list.reduce((m, x) => Math.max(m, x.order), -1) + 1;
       return [...list, {
         id: newId, order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
-        status: 'open', doneAt: null, plannedSets: null, reminder: null, sets: setsFromHistory(exId, 3, 8, state.sessions, { ...opts, fallbackWeight: (exById[exId] || {}).startWeight })
+        status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: entryMode(sessionMode, exById[exId]),
+        sets: setsFromHistory(exId, 3, 8, state.sessions, optsFor(exId))
       }];
     });
     setOpenId(newId);
@@ -875,6 +883,12 @@ function Workout({ id }) {
     }
     // Automatic suggestion (green): your own weight or scheme reminder always wins.
     const suggest = !editing && !(inRem && (inRem.dir || inRem.scheme)) && suggestIncrease(d.sessions, e, item, ex, id);
+    // Double progression: reps inside the range first; all sets at the top last time → more weight.
+    const dbl = modeOf(e) === 'double' && hasRange(ex);
+    const ready = dbl && !editing && !(inRem && inRem.dir) ? doubleReady(d.sessions, e, ex, id) : null;
+    const lastD = dbl && openId === e.id ? lastDone(d.sessions, e.exerciseId, { excludeSessionId: id, mode: 'double' }) : null;
+    // Reaching the top today: shown unless the card already says it is time for more weight.
+    const top = dbl && e.status === 'open' && !ready && atTop(e, ex);
     const open = openId === e.id;
     const isDone = e.status === 'done';
     const isSkipped = e.status === 'skipped';
@@ -902,10 +916,11 @@ function Workout({ id }) {
           onClick=${() => { if (suppressClick.current) return; clearEdit(); setOpenId(open ? null : e.id); }}>
           <div class="ex-head-text">
             <span class="ex-name">${open && e.status === 'open' && !editing ? html`<span class="live-dot" aria-label="In progress"></span>` : null}${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
-            <span class="small muted num">${e.sets.length} × ${rTxt} · ${wTxt}</span>
+            <span class="small muted num">${e.sets.length} × ${dbl ? rangeText(ex) : rTxt} · ${wTxt}</span>
             ${tags.length ? html`<span class="ex-tag">${tags.join(' · ')}</span>` : null}
-            ${inChips.length || (suggest && !open) ? html`<span class="rem-chips">
+            ${inChips.length || ((suggest || ready) && !open) ? html`<span class="rem-chips">
               ${suggest && !open ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />suggested</span>` : null}
+              ${ready && !open ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />more weight</span>` : null}
               ${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}
             </span>` : null}
             ${outRem ? html`<span class="rem-out">Next time: ${remText(outRem)}</span>` : null}
@@ -924,6 +939,8 @@ function Workout({ id }) {
           </div>` : html`
           ${suggest ? html`<div class="sug-row"><button class="rem-chip sug sug-btn" aria-label=${'Suggested: more weight for ' + ex.name + '. Options'} onClick=${() => setSugSheet(e.exerciseId)}>
             <${Icon} name="up" size=${12} sw=${2.6} />suggested</button></div>` : null}
+          ${ready ? html`<div class="dp-box" role="note"><${Icon} name="up" size=${18} sw=${2.4} />
+            <span><strong>Time for more weight.</strong> Last time every set reached ${ready.max}, the top of ${rangeText(ex)}.</span></div>` : null}
           ${inRem ? html`<div class="rem-box">
             <span class="rem-label">Reminder from ${fmtDate(incoming.session.startedAt)}</span>
             ${inRem.dir === 'up' ? html`<strong>↑ Increase the weight</strong>` : null}
@@ -940,7 +957,10 @@ function Workout({ id }) {
             ${inRem.note && inRem.note.trim() ? html`<em style="color: var(--text-2)">“${inRem.note.trim()}”</em>` : null}
             <span class="tiny muted">Cleared when you tap Done.</span>
           </div>` : null}
-          <div class="set-grid"><span></span><span class="col-label">${bwLoad ? 'KG ON BODY WEIGHT' : 'KG'}</span><span class="col-label">REPS</span><span></span></div>
+          ${lastD ? html`<span class="dp-last small num">Last time: ${lastD.entry.sets.every((x) => x.weight === lastD.entry.sets[0].weight)
+            ? fmtLoad(lastD.entry.sets[0].weight, ex) + ' × ' + lastD.entry.sets.map((x) => x.reps).join(' · ')
+            : setsText(lastD.entry.sets, ex)}</span>` : null}
+          <div class="set-grid"><span></span><span class="col-label">${bwLoad ? 'KG ON BODY WEIGHT' : 'KG'}</span><span class="col-label">${dbl ? 'REPS ' + rangeText(ex) : 'REPS'}</span><span></span></div>
           ${e.sets.map((s, i) => {
             const editW = edit && edit.entryId === e.id && edit.i === i && edit.f === 'w';
             const editR = edit && edit.entryId === e.id && edit.i === i && edit.f === 'r';
@@ -955,7 +975,7 @@ function Workout({ id }) {
                   onInput=${onEditInput} onBlur=${commitEdit} onKeyDown=${onEditKey} />
                 <button class="icon-btn" aria-label=${'Increase weight, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { weight: increase(ex.equipment, latestEntry(e.id).sets[i].weight, settings) })}><${Icon} name="plus" size=${18} sw=${2.2} /></button>
               </div>
-              <div class="stepper">
+              <div class=${'stepper' + (dbl && s.reps >= ex.repMax ? ' rep-max' : dbl && s.reps < ex.repMin ? ' rep-low' : '')}>
                 <button class="icon-btn" aria-label=${'Fewer reps, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { reps: Math.max(0, latestEntry(e.id).sets[i].reps - 1) })}><${Icon} name="minus" size=${18} sw=${2.2} /></button>
                 <input class="step-field" inputmode="numeric" enterkeyhint="done" autocomplete="off" aria-label=${'Reps, set ' + (i + 1)}
                   value=${editR ? edit.draft : String(s.reps)}
@@ -966,6 +986,8 @@ function Workout({ id }) {
               ${e.sets.length > 1 ? html`<button class="icon-btn remove-set" aria-label=${'Remove set ' + (i + 1) + ' from today’s log'} onClick=${() => patchEntry(e.id, (x) => ({ ...x, sets: x.sets.filter((_, j) => j !== i) }))}><${Icon} name="x" size=${18} /></button>` : html`<span></span>`}
             </div>`;
           })}
+          ${top ? html`<div class="dp-box" role="status"><${Icon} name="up" size=${18} sw=${2.4} />
+            <span>All sets at ${ex.repMax}, the top of ${rangeText(ex)}. <strong>Next time: more weight.</strong></span></div>` : null}
           ${setupOpen[e.id] && ex.setup ? html`<div class="note-box"><${Icon} name="wrench" size=${18} /><span>Machine setup: <strong>${ex.setup}</strong></span></div>` : null}
           <div class="act-row" style="margin-top: 6px">
             <button class="btn" onClick=${() => patchEntry(e.id, (x) => ({ ...x, sets: [...x.sets, { ...x.sets[x.sets.length - 1] }] }))}><${Icon} name="plus" size=${16} sw=${2.2} /> Set</button>
@@ -982,8 +1004,8 @@ function Workout({ id }) {
               <button class=${'chip-btn' + (myRem.dir === 'up' ? ' on' : '')} aria-pressed=${myRem.dir === 'up'} onClick=${() => { setReminder(e.id, { dir: myRem.dir === 'up' ? null : 'up' }); setRemPanel(null); }}>↑ Weight</button>
               <button class=${'chip-btn' + (myRem.dir === 'down' ? ' on' : '')} aria-pressed=${myRem.dir === 'down'} onClick=${() => { setReminder(e.id, { dir: myRem.dir === 'down' ? null : 'down' }); setRemPanel(null); }}>↓ Weight</button>
             </div>
-            <span class="tiny muted">Change scheme</span>
-            <div class="grid-4">
+            ${dbl ? null : html`<span class="tiny muted">Change scheme</span>`}
+            ${dbl ? null : html`<div class="grid-4">
               ${SCHEMES.map((sc) => {
                 const label = schemeLabel(sc);
                 const isCurrent = nowScheme && nowScheme.sets === sc.sets && nowScheme.reps === sc.reps;
@@ -991,7 +1013,7 @@ function Workout({ id }) {
                 return html`<button key=${label} class=${'chip-btn' + (on ? ' on' : '') + (isCurrent ? ' current' : '')} disabled=${!!isCurrent} aria-pressed=${!!on}
                   aria-label=${isCurrent ? label + ', current scheme' : label} onClick=${() => setReminder(e.id, { scheme: on ? null : sc })}>${label}</button>`;
               })}
-            </div>
+            </div>`}
             ${noteOpen[e.id] || (myRem.note && myRem.note.length)
               ? html`<label class="field">Note
                   <input class="input" placeholder="e.g. seat one notch higher" value=${myRem.note || ''} onInput=${(ev) => setReminder(e.id, { note: ev.target.value })} />
@@ -1015,7 +1037,8 @@ function Workout({ id }) {
           ? html`<span class="section-label" style="margin: 0">Editing</span>`
           : html`<button class="icon-btn back" aria-label="Back to Today" onClick=${() => go({ name: 'home' })}><${Icon} name="back" size=${22} /></button>`}
         <div style="display: flex; align-items: center; gap: 2px">
-          <span class="small muted">${fmtDate(session.startedAt, true)}${editing ? ' · ' + hhmm(session.startedAt) : ''}</span>
+          <span class=${'mode-tag' + (sessionMode === 'double' ? ' double' : '')}>${sessionMode === 'double' ? 'Double progression' : 'Classic'}</span>
+          <span class="small muted" style="margin-left: 6px">${fmtDate(session.startedAt, true)}${editing ? ' · ' + hhmm(session.startedAt) : ''}</span>
           <button class="icon-btn" style="margin-right: -10px" aria-label="Workout options" onClick=${() => setMenu(true)}><${Icon} name="more" size=${24} sw=${3.5} /></button>
         </div>
       </div>
@@ -1095,8 +1118,11 @@ function Workout({ id }) {
     ${planAsk ? html`<div class="overlay center">
       <div class="dialog" role="alertdialog" aria-labelledby="plan-ask-title">
         <h2 id="plan-ask-title">Update ${planAsk.planLabel}?</h2>
+        ${planAsk.setsOnly ? html`
+        <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: plan ${planAsk.from.sets} sets → this workout ${planAsk.to.sets} sets.</p>
+        <p class="small muted" style="line-height: 1.45">Update plan: ${planAsk.planLabel} uses ${planAsk.to.sets} sets from the next time. Only this workout: the plan stays at ${planAsk.from.sets}.</p>` : html`
         <p style="line-height: 1.45"><strong>${planAsk.name}</strong>: plan ${schemeLabel(planAsk.from)} → this workout ${schemeLabel(planAsk.to)}.</p>
-        <p class="small muted" style="line-height: 1.45">Update plan: ${planAsk.planLabel} uses ${schemeLabel(planAsk.to)} from the next time. Only this workout: the plan stays ${schemeLabel(planAsk.from)}.</p>
+        <p class="small muted" style="line-height: 1.45">Update plan: ${planAsk.planLabel} uses ${schemeLabel(planAsk.to)} from the next time. Only this workout: the plan stays ${schemeLabel(planAsk.from)}.</p>`}
         <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px">
           <button class="btn btn-primary btn-big" autofocus onClick=${() => answerPlan(true)}>Update plan</button>
           <button class="btn btn-big" onClick=${() => answerPlan(false)}>Only this workout</button>
@@ -1112,6 +1138,8 @@ function Workout({ id }) {
 
 // Comparison cards: shown at the end of a workout (live) and at the bottom of every workout log.
 function SummaryCards({ sum, plan, live }) {
+  // A Double progression workout: progress is more weight or more reps (different units: no bars).
+  const dbl = sum.mode === 'double';
   const maxAbs = Math.max(0, ...sum.rows.filter((r) => r.delta !== null && !r.bodyweight).map((r) => Math.abs(r.delta)));
   const volPct = sum.volPct === null ? '—' : (sum.volPct > 0 ? '+' : sum.volPct < 0 ? '−' : '±') + Math.abs(sum.volPct).toFixed(1) + '%';
   const kg = (v) => Math.round(v).toLocaleString('en') + ' kg';
@@ -1137,10 +1165,12 @@ function SummaryCards({ sum, plan, live }) {
 
       <section class="card card-pad" style="gap: 12px">
         <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap">
-          <h2 style="font-size: 15px; font-weight: 600">Top-set weight vs last time</h2>
-          <div class="legend"><span><i style="background: var(--up)"></i>Heavier</span><span><i style="background: var(--down)"></i>Lighter</span></div>
+          <h2 style="font-size: 15px; font-weight: 600">${dbl ? 'Progress vs last time' : 'Top-set weight vs last time'}</h2>
+          <div class="legend"><span><i style="background: var(--up)"></i>Heavier</span>${dbl ? html`<span><i style="background: var(--go)"></i>More reps</span>` : null}<span><i style="background: var(--down)"></i>Lighter</span></div>
         </div>
-        <span class="small muted">${sum.heavier} heavier · ${sum.lighter} lighter · ${sum.same} same${sum.records ? ' · ' + sum.records + (sum.records === 1 ? ' new record' : ' new records') : ''}</span>
+        <span class="small muted">${dbl
+          ? [sum.heavier + ' heavier', sum.moreReps + ' more reps', sum.lighter + ' lighter'].concat(sum.fewerReps ? [sum.fewerReps + ' fewer reps'] : []).concat([sum.same + ' same']).join(' · ')
+          : sum.heavier + ' heavier · ' + sum.lighter + ' lighter · ' + sum.same + ' same'}${sum.records ? ' · ' + sum.records + (sum.records === 1 ? ' new record' : ' new records') : ''}</span>
         <div>
           ${sum.rows.length ? sum.rows.map((r) => {
             let detail, delta, bw = 0, dir = null;
@@ -1149,6 +1179,12 @@ function SummaryCards({ sum, plan, live }) {
             const wFrom = (v) => (r.load === 'bodyweight' ? fmtLoad(v, lx).replace(/ kg$/, '') : fmtNum(v));
             if (r.delta === null) { detail = r.bodyweight ? r.totalReps + ' reps' : wt(r.top) + ' · first time'; delta = 'new'; }
             else if (r.bodyweight) { detail = 'reps ' + r.prevReps + ' → ' + r.totalReps; delta = r.delta > 0 ? '+' + r.delta + ' reps' : r.delta < 0 ? '−' + (-r.delta) + ' reps' : 'same'; }
+            else if (r.repsDelta !== null && r.repsDelta !== undefined) {
+              detail = wt(r.top) + ' · reps ' + r.prevReps + ' → ' + r.totalReps + (r.vsPlan ? ' · vs plan' : '');
+              const n = Math.abs(r.repsDelta);
+              delta = r.repsDelta > 0 ? '+' + n + (n === 1 ? ' rep' : ' reps') : r.repsDelta < 0 ? '−' + n + (n === 1 ? ' rep' : ' reps') : 'same';
+              dir = r.repsDelta > 0 ? 'reps' : r.repsDelta < 0 ? 'down' : null;
+            }
             else {
               detail = (r.delta !== 0 ? wFrom(r.prevTop) + ' → ' + wt(r.top) : wt(r.top)) + (r.vsPlan ? ' · vs plan' : '');
               delta = r.delta > 0 ? '+' + fmtNum(r.delta) + ' kg' : r.delta < 0 ? '−' + fmtNum(-r.delta) + ' kg' : 'same';
@@ -1157,14 +1193,16 @@ function SummaryCards({ sum, plan, live }) {
             const rec = r.record ? (r.record.kind === 'weight'
               ? 'New record! ' + wt(r.record.value) + ' × ' + r.record.reps + ', set ' + (r.record.setIndex + 1) + ' of ' + r.record.setCount + ' (best was ' + wt(r.record.previous) + ')'
               : 'New record! ' + r.record.value + ' reps (best was ' + r.record.previous + ')') : null;
-            return html`<div key=${r.entryId} class="sum-row">
+            const tone = dir === 'up' ? 'var(--up)' : dir === 'down' ? 'var(--down)' : dir === 'reps' ? 'var(--go)' : 'var(--text)';
+            return html`<div key=${r.entryId} class=${'sum-row' + (dbl ? ' no-bar' : '')}>
               <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
                 <span style="font-size: 14px; font-weight: 500">${r.name}</span>
                 <span class="tiny muted num">${detail}</span>
                 ${rec ? html`<span class="record"><${Icon} name="trophy" size=${12} sw=${2.4} />${rec}</span>` : null}
+                ${dbl && r.atTop ? html`<span class="rem-chip sug" style="align-self: flex-start"><${Icon} name="up" size=${12} sw=${2.6} />Next time: more weight</span>` : null}
               </div>
-              <div class="dbar" aria-hidden="true"><div class="zero"></div>${dir ? html`<div class=${dir} style=${'width:' + bw + '%'}></div>` : null}</div>
-              <span class="small num" style="text-align: right; font-weight: 600">${delta}</span>
+              ${dbl ? null : html`<div class="dbar" aria-hidden="true"><div class="zero"></div>${dir ? html`<div class=${dir} style=${'width:' + bw + '%'}></div>` : null}</div>`}
+              <span class="small num" style=${'text-align: right; font-weight: 600' + (dbl ? '; white-space: nowrap; color: ' + tone : '')}>${delta}</span>
             </div>`;
           }) : html`<p class="small muted">No exercises were confirmed.</p>`}
         </div>
@@ -1210,8 +1248,8 @@ function addToFinished(id, exId) {
   const order = cur.entries.reduce((m, x) => Math.max(m, x.order), -1) + 1;
   const entry = {
     id: uid(), order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
-    status: 'open', doneAt: null, plannedSets: null, reminder: null,
-    sets: setsFromHistory(exId, 3, 8, state.sessions, { excludeSessionId: id, fallbackWeight: (exById[exId] || {}).startWeight })
+    status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: entryMode(cur.mode, exById[exId]),
+    sets: setsFromHistory(exId, 3, 8, state.sessions, startOpts(cur.mode, exById[exId], { excludeSessionId: id, fallbackWeight: (exById[exId] || {}).startWeight }))
   };
   saveSession({ ...cur, finishedAt: null, entries: [...cur.entries, entry] });
   go({ name: 'workout', id });
@@ -1362,7 +1400,7 @@ function Plans() {
             <span class="small muted num" style="width: 18px; align-self: flex-start; padding-top: 2px">${i + 1}</span>
             <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
               <span style="font-size: 16px; font-weight: 600; line-height: 1.25">${ex.name}</span>
-              <span class="small num" style="color: var(--text-2)">${(it.sets || '?') + ' × ' + (it.reps || '?') + (wTxt === '—' ? '' : ' · ' + wTxt)}</span>
+              <span class="small num" style="color: var(--text-2)">${(it.sets || '?') + ' × ' + (d.settings.progression === 'double' && isDoubleEx(ex) ? rangeText(ex) : (it.reps || '?')) + (wTxt === '—' ? '' : ' · ' + wTxt)}</span>
             </span>
             <${ExIcon} id=${ex.id} />
           </button>
@@ -1372,9 +1410,10 @@ function Plans() {
             </label>
             <div class="grid-3">
               <label class="field">Sets<input class="input" inputmode="numeric" value=${it.sets} onInput=${(e) => editItem(it.id, { sets: e.target.value.replace(/[^0-9]/g, '') })} /></label>
-              <label class="field">Reps<input class="input" inputmode="numeric" value=${it.reps} onInput=${(e) => editItem(it.id, { reps: e.target.value.replace(/[^0-9]/g, '') })} /></label>
+              <label class="field">${ex.double ? 'Reps (Classic)' : 'Reps'}<input class="input" inputmode="numeric" value=${it.reps} onInput=${(e) => editItem(it.id, { reps: e.target.value.replace(/[^0-9]/g, '') })} /></label>
               <label class="field">Weight kg<input class="input" inputmode=${negOk ? 'text' : 'decimal'} placeholder="optional" value=${it.weight === null || it.weight === undefined ? '' : typeof it.weight === 'number' ? signedNum(it.weight) : it.weight} onInput=${(e) => editItem(it.id, { weight: e.target.value.replace(negOk ? /[^0-9.,\-\u2212]/g : /[^0-9.,]/g, '') })} /></label>
             </div>
+            <${DoubleSwitch} key=${'dp' + ex.id} ex=${ex} planReps=${parseInt(it.reps, 10) || 8} onChange=${(patch) => editEx(ex.id, patch)} />
             <div class="field">Equipment
               <div class="seg" role="radiogroup" aria-label="Equipment">
                 <button role="radio" aria-checked=${ex.equipment !== 'dumbbell'} class=${ex.equipment !== 'dumbbell' ? 'on' : ''} onClick=${() => editEx(ex.id, { equipment: 'machine' })}>Machine / barbell</button>
@@ -1638,7 +1677,7 @@ function SessionDetail({ id, from }) {
     <div class="header" style="gap: 6px">
       <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: from === 'home' ? 'home' : 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />${from === 'home' ? 'Today' : d.progressTab === 'overview' ? 'Progress' : 'Workouts'}</button>
       <h1 class="title">${planName(plan)}</h1>
-      <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}</span>
+      <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}${session.mode === 'double' ? html` <span class="mode-tag double">Double progression</span>` : null}</span>
     </div>
     <div class="main">
       <${SessionCard} key=${session.id} session=${session} note="Fill in when you like: it saves as you type." />
@@ -1861,6 +1900,48 @@ function LoadPicker({ ex, onChange }) {
   </div>`;
 }
 
+// Double progression for one exercise: whether it can switch to its rep range. It stays as it is
+// when Settings changes mode; with it off the exercise always keeps the plan's sets × reps.
+function DoubleSwitch({ ex, planReps, onChange }) {
+  const on = !!ex.double;
+  const txt = (v) => (v ? String(v) : '');
+  const [minT, setMinT] = useState(txt(ex.repMin));
+  const [maxT, setMaxT] = useState(txt(ex.repMax));
+  useEffect(() => { setMinT(txt(ex.repMin)); setMaxT(txt(ex.repMax)); }, [ex.repMin, ex.repMax]);
+  const toggle = () => {
+    if (on) { onChange({ double: false }); return; }
+    const r = hasRange(ex) ? { min: ex.repMin, max: ex.repMax } : defaultRange(planReps);
+    onChange({ double: true, repMin: r.min, repMax: r.max });
+  };
+  // The edited end wins: a bottom above the top moves the top up, and the other way round.
+  const commit = (which) => {
+    let a = parseInt(minT, 10), b = parseInt(maxT, 10);
+    if (!(a >= 1 && a <= 50) || !(b >= 1 && b <= 50)) { setMinT(txt(ex.repMin)); setMaxT(txt(ex.repMax)); return; }
+    if (a > b) { if (which === 'min') b = a; else a = b; }
+    setMinT(String(a)); setMaxT(String(b));
+    if (a !== ex.repMin || b !== ex.repMax) onChange({ repMin: a, repMax: b });
+  };
+  const blurOnEnter = (e) => { if (e.key === 'Enter') e.target.blur(); };
+  return html`<div class=${'dp-switch' + (on ? ' on' : '')}>
+    <div class="row" style="gap: 12px">
+      <span style="display: flex; flex-direction: column; gap: 2px">
+        <span style="font-weight: 600">Double progression</span>
+        <span class="tiny muted" style="line-height: 1.4">${on
+          ? 'Used when Settings is on Double progression. Same range in every workout.'
+          : 'Off: always the plan’s sets × reps, in both modes.'}</span>
+      </span>
+      <button class=${'switch' + (on ? ' on' : '')} role="switch" aria-checked=${on} aria-label="Double progression" onClick=${toggle}><span></span></button>
+    </div>
+    ${on ? html`<div class="dp-range">Reps from
+      <input class="input" inputmode="numeric" enterkeyhint="done" aria-label="Lowest reps" value=${minT}
+        onInput=${(e) => setMinT(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))} onBlur=${() => commit('min')} onKeyDown=${blurOnEnter} />
+      to
+      <input class="input" inputmode="numeric" enterkeyhint="done" aria-label="Highest reps" value=${maxT}
+        onInput=${(e) => setMaxT(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))} onBlur=${() => commit('max')} onKeyDown=${blurOnEnter} />
+    </div>` : null}
+  </div>`;
+}
+
 // The per-exercise switch for automatic "more weight" suggestions (on unless switched off).
 function SuggestSwitch({ ex, onChange }) {
   const on = !ex.noSuggest;
@@ -1904,6 +1985,7 @@ function ExerciseEditor({ ex, inPlans, hasLog }) {
         <button role="radio" aria-checked=${ex.equipment === 'dumbbell'} class=${ex.equipment === 'dumbbell' ? 'on' : ''} onClick=${() => save({ equipment: 'dumbbell' })}>Dumbbells</button>
       </div>
     </div>
+    <${DoubleSwitch} key=${'dp' + ex.id} ex=${ex} planReps=${(state.plans.flatMap((p) => p.items).find((it) => it.exerciseId === ex.id) || {}).reps || 8} onChange=${(patch) => save(patch)} />
     <${LoadPicker} key=${ex.id} ex=${ex} onChange=${(patch) => save(patch)} />
     <label class="field">Starting weight, kg
       <input class="input" inputmode=${loadOf(ex) === 'bodyweight' ? 'text' : 'decimal'} placeholder="optional" value=${startW} onInput=${(e) => setStartW(e.target.value.replace(loadOf(ex) === 'bodyweight' ? /[^0-9.,\-\u2212]/g : /[^0-9.,]/g, ''))} onBlur=${commitStart} onKeyDown=${blurOnEnter} />
@@ -1965,7 +2047,7 @@ function Exercises() {
           <button class="ex-head" style="min-height: 60px" aria-expanded=${open} onClick=${() => setOpenId(open ? null : ex.id)}>
             <div class="ex-head-text">
               <span class="ex-name">${ex.name}</span>
-              <span class="small muted">${loadLabel(ex)} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
+              <span class="small muted">${loadLabel(ex)}${isDoubleEx(ex) ? ' · reps ' + rangeText(ex) : ''} · ${ps.length ? 'Workout ' + ps.join(' + ') : 'not in a plan'} · ${wTxt}</span>
             </div>
           </button>
           ${open ? html`<${ExerciseEditor} key=${ex.id} ex=${ex} inPlans=${ps} hasLog=${!!last} />` : null}
@@ -2027,6 +2109,15 @@ function Settings() {
           <span style="display: flex; align-items: center; gap: 6px" class="small muted"><${BodyWeightInput} value=${s.bodyWeight} /> kg</span>
         </div>
         <span class="tiny muted" style="line-height: 1.4">Used for Dips and Pull-ups in volume and total lifted. Each workout keeps the value of the day it starts.</span>
+      </div>
+
+      <span class="section-label">Progression</span>
+      <div class="card card-pad" style="gap: 10px">
+        <div class="seg" role="radiogroup" aria-label="Progression" style="background: var(--bg)">
+          <button role="radio" aria-checked=${s.progression !== 'double'} class=${s.progression !== 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'classic' })}>Classic</button>
+          <button role="radio" aria-checked=${s.progression === 'double'} class=${s.progression === 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'double' })}>Double progression</button>
+        </div>
+        <span class="tiny muted" style="line-height: 1.4">Exercises with Double progression on use their rep range and their own weights. The others work as in Classic. A workout already open keeps its mode.</span>
       </div>
 
       <span class="section-label">Rotation</span>
