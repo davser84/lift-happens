@@ -18,10 +18,11 @@ export const DEFAULT_SETTINGS = {
   bodyWeightFirstDay: null,
   // 1.9.0: how each exercise logs its weight was set up once, by name (see setUpLoads).
   loadsSetUp: false,
-  // 1.10.0: 'classic' (sets × reps) or 'double' (rep range first, then weight).
-  progression: 'classic',
   // 1.11.0: sets and reps moved from the plans to the exercises (see moveSchemes).
-  schemesMoved: false
+  schemesMoved: false,
+  // 1.12.0: the progression belongs to each exercise; the old Settings switch (progression:
+  // 'classic' | 'double') was turned into the exercises' own choice once (see moveProgression).
+  progressionMoved: false
 };
 
 export function uid() {
@@ -190,9 +191,9 @@ function spread(weights, count) {
   return out;
 }
 
-// The last done entry whose values an exercise starts from. An exercise with Double progression
-// switched on keeps Classic and Double apart (opts.split): each mode starts from its own last time,
-// and falls back to the other one (weights only) when it has none yet.
+// The last done entry whose values an exercise starts from. Classic and Double are kept apart
+// (opts.split): each mode starts from its own last time, and falls back to the other one (weights
+// only) when it has none yet.
 function startFrom(sessions, exerciseId, opts) {
   const base = { excludeSessionId: opts.excludeSessionId, before: opts.before };
   if (!opts.split) return { prev: lastDone(sessions, exerciseId, base), own: true };
@@ -228,9 +229,9 @@ export function startSets(ex, sessions, opts = {}) {
 const posInt = (v, d) => { const n = parseInt(v, 10); return n >= 1 ? n : d; };
 export const classicScheme = (ex) => ({ sets: posInt(ex && ex.sets, 3), reps: posInt(ex && ex.reps, 8) });
 export const doubleSets = (ex) => posInt(ex && (ex.dSets ?? ex.sets), 3);
-// "3 × 8", or "3 × 6–10" for an exercise done in Double progression in a workout of that mode.
-export function schemeTextOf(ex, sessionMode) {
-  if (entryMode(sessionMode, ex) === 'double') return doubleSets(ex) + ' × ' + ex.repMin + '–' + ex.repMax;
+// "3 × 8", or "3 × 6–10" for an exercise set to Double progression.
+export function schemeTextOf(ex) {
+  if (exMode(ex) === 'double') return doubleSets(ex) + ' × ' + ex.repMin + '–' + ex.repMax;
   const sc = classicScheme(ex);
   return sc.sets + ' × ' + sc.reps;
 }
@@ -257,17 +258,37 @@ export function moveSchemes(exercises, plans) {
 
 export const PROGRESSIONS = ['classic', 'double'];
 export const hasRange = (ex) => !!ex && Number.isInteger(ex.repMin) && Number.isInteger(ex.repMax) && ex.repMin >= 1 && ex.repMax >= ex.repMin;
-// Double progression switched on for the exercise, with a valid range.
+// The exercise is set to Double progression, with a valid range.
 export const isDoubleEx = (ex) => !!(ex && ex.double && hasRange(ex));
+// How an exercise is done: its own choice, in every workout (1.12.0).
+export const exMode = (ex) => (isDoubleEx(ex) ? 'double' : 'classic');
 export const rangeOf = (ex) => (hasRange(ex) ? { min: ex.repMin, max: ex.repMax } : null);
 export const rangeText = (ex) => (hasRange(ex) ? ex.repMin + '–' + ex.repMax : '');
 export const modeOf = (entry) => (entry && entry.mode === 'double' ? 'double' : 'classic');
-// The mode an exercise is done in, in a workout of the given mode.
-export const entryMode = (sessionMode, ex) => (sessionMode === 'double' && isDoubleEx(ex) ? 'double' : 'classic');
-// Options for starting values of one exercise in a workout of the given mode.
-export function startOpts(sessionMode, ex, base = {}) {
-  const mode = entryMode(sessionMode, ex);
-  return { ...base, mode, split: isDoubleEx(ex), range: mode === 'double' ? rangeOf(ex) : null };
+// Options for starting values of one exercise in its own mode (or the given one).
+export function startOpts(ex, base = {}, mode = exMode(ex)) {
+  const m = mode === 'double' && hasRange(ex) ? 'double' : 'classic';
+  return { ...base, mode: m, split: true, range: m === 'double' ? rangeOf(ex) : null };
+}
+// The exercise switched to Classic or Double progression (a range from its Classic reps if it has
+// none yet; the Double sets start equal to the Classic ones).
+export function withMode(ex, mode) {
+  if (mode !== 'double') return { ...ex, double: false };
+  const r = hasRange(ex) ? rangeOf(ex) : defaultRange(classicScheme(ex).reps);
+  return { ...ex, double: true, repMin: r.min, repMax: r.max, dSets: doubleSets(ex) };
+}
+// An open entry started again in its exercise's mode: today's sets as the workout would have proposed
+// them (switching Classic ↔ Double during a workout).
+export function restartEntry(entry, ex, sessions, sessionId) {
+  const so = startOpts(ex, { excludeSessionId: sessionId });
+  const sets = startSets(ex, sessions, so);
+  return { ...entry, mode: so.mode, sets, plannedSets: entry.kind === 'added' ? null : sets.length, appliedScheme: null, planAsked: null };
+}
+// 1.12.0, once: the Settings switch becomes each exercise's own choice. With Settings on Classic every
+// exercise becomes Classic (ranges kept); with Double each exercise keeps its choice.
+export function moveProgression(exercises, settings) {
+  if (settings && settings.progression === 'double') return exercises;
+  return exercises.map((ex) => (ex.double ? { ...ex, double: false } : ex));
 }
 // A range to start from when Double progression is switched on, from the plan's reps.
 export function defaultRange(reps) {
@@ -291,19 +312,17 @@ export function doubleReady(sessions, entry, ex, currentSessionId) {
   return { last: prev, max: ex.repMax };
 }
 
-export function createSession(plan, sessions, now = new Date(), exercisesById = {}, mode = 'classic') {
+export function createSession(plan, sessions, now = new Date(), exercisesById = {}) {
   const id = uid();
-  const sessionMode = mode === 'double' ? 'double' : 'classic';
   return {
     id,
     planId: plan.id,
     startedAt: now.toISOString(),
     finishedAt: null,
     note: '',
-    mode: sessionMode,
     entries: plan.items.map((item, i) => {
       const ex = exercisesById[item.exerciseId] || { id: item.exerciseId };
-      const so = startOpts(sessionMode, ex, { excludeSessionId: id });
+      const so = startOpts(ex, { excludeSessionId: id });
       const sets = startSets(ex, sessions, so);
       return {
         id: uid(),
@@ -351,7 +370,7 @@ export function plannedPlanId(plans, settings) {
 
 // Each exercise is compared with the last time it was done, in any workout.
 // Total volume is compared with the previous workout of the same type (A with A, B with B),
-// counting only exercises done both times; the first workout of a type uses the plan's weights.
+// counting only exercises done both times; the first workout of a type has nothing to compare.
 export function sessionSummary(session, sessions, exercisesById, plan = null, opts0 = {}) {
   const before = ts(session.startedAt);
   const opts = { excludeSessionId: session.id, before };
@@ -361,10 +380,9 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
     if (e.status !== 'done') continue;
     const ex = exercisesById[e.exerciseId];
     const hist = exerciseHistory(sessions, e.exerciseId, opts);
-    // Records count every workout; the comparison uses the last time in the same mode when the
-    // exercise keeps Classic and Double apart.
+    // Records count every workout; the comparison uses the last time in the same mode.
     const mode = modeOf(e);
-    const cmp = isDoubleEx(ex) ? exerciseHistory(sessions, e.exerciseId, { ...opts, mode }) : hist;
+    const cmp = exerciseHistory(sessions, e.exerciseId, { ...opts, mode });
     // First time in this mode: the last time in the other mode (where its weights came from).
     const prev = cmp.length ? cmp[cmp.length - 1] : hist.length ? hist[hist.length - 1] : null;
     const vsPlan = false;
@@ -435,7 +453,8 @@ export function sessionSummary(session, sessions, exercisesById, plan = null, op
     volPrev: prevSame ? { id: prevSame.id, startedAt: prevSame.startedAt } : null,
     volPct: volLast > 0 ? (volToday / volLast - 1) * 100 : null,
     heavier, lighter, same, records, moreReps, fewerReps,
-    mode: session.mode === 'double' ? 'double' : 'classic',
+    // Any exercise in Double progression: progress is more weight or more reps (no bars).
+    mode: done.some((e) => modeOf(e) === 'double') ? 'double' : 'classic',
     setsLogged: done.reduce((a, e) => a + e.sets.length, 0),
     skipped: session.entries.filter((e) => e.status === 'skipped').length
   };
@@ -483,7 +502,7 @@ export function suggestIncrease(sessions, entry, exercise, currentSessionId) {
   if (!entry || !exercise || entry.kind !== 'planned' || entry.status !== 'open') return false;
   if (modeOf(entry) === 'double') return false;
   if (exercise && exercise.noSuggest) return false;
-  const h = exerciseHistory(sessions, entry.exerciseId, { excludeSessionId: currentSessionId, ...(isDoubleEx(exercise) ? { mode: 'classic' } : {}) });
+  const h = exerciseHistory(sessions, entry.exerciseId, { excludeSessionId: currentSessionId, mode: 'classic' });
   if (h.length < 2) return false;
   const [a, b] = h.slice(-2);
   const wa = a.entry.sets.map((x) => x.weight || 0);

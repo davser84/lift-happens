@@ -223,9 +223,9 @@ test('1.11.0: sets and reps move from the plans to the exercises; plans keep onl
   assert.deepEqual([by.lp.sets, by.lp.reps, by.lp.dSets, by.lp.repMin], [3, 8, 3, 6]);
   assert.deepEqual([by.x.sets, by.x.reps], [3, 8]);
   assert.deepEqual(m.plans[1].items, [{ id: 'a1', exerciseId: 'face' }, { id: 'a2', exerciseId: 'lp' }]);
-  assert.equal(schemeTextOf(by.lp, 'double'), '3 × 6–10');
-  assert.equal(schemeTextOf(by.lp, 'classic'), '3 × 8');
-  assert.equal(schemeTextOf(by.face, 'double'), '3 × 12');
+  assert.equal(schemeTextOf(by.lp), '3 × 6–10');
+  assert.equal(schemeTextOf({ ...by.lp, double: false }), '3 × 8');
+  assert.equal(schemeTextOf(by.face), '3 × 12');
   // Backups from before 1.11.0 keep their plan sets and reps until they are moved.
   const data = validateImport({ app: 'lift-happens', exercises, plans });
   assert.deepEqual(data.plans[1].items[0], { id: 'a1', exerciseId: 'face', sets: 3, reps: 12 });
@@ -514,7 +514,8 @@ test('session data line, this week and the closest milestone', () => {
 
 import {
   createSession as cs110, startSets as ss110, doubleReady, atTop, schemeChange as sc110, suggestIncrease as si110,
-  sessionSummary as sum110, defaultRange, isDoubleEx, entryMode, startOpts, validateImport as vi110, DEFAULT_SETTINGS as DS110
+  sessionSummary as sum110, defaultRange, isDoubleEx, exMode, startOpts, validateImport as vi110, DEFAULT_SETTINGS as DS110,
+  withMode, restartEntry, moveProgression
 } from '../js/logic.js';
 
 const LP = { id: 'lp', name: 'Leg Press', equipment: 'machine', load: 'total', double: true, repMin: 6, repMax: 10, sets: 3, reps: 8, dSets: 3 };
@@ -527,13 +528,14 @@ const sess110 = (day, entries, mode) => ({ id: 's' + day, planId: 'b', startedAt
 const W = (w, reps) => reps.map((r) => ({ weight: w, reps: r }));
 
 test('double progression: which exercises, the default range, the mode of an entry', () => {
-  assert.equal(DS110.progression, 'classic');
+  assert.equal(DS110.progressionMoved, false);
+  assert.equal('progression' in DS110, false, 'no Settings switch since 1.12.0');
   assert.equal(isDoubleEx(LP), true);
-  assert.equal(isDoubleEx(FP), false, 'switched off');
+  assert.equal(isDoubleEx(FP), false, 'Classic');
   assert.equal(isDoubleEx({ double: true, repMin: 10, repMax: 6 }), false, 'invalid range');
-  assert.equal(entryMode('double', LP), 'double');
-  assert.equal(entryMode('double', FP), 'classic');
-  assert.equal(entryMode('classic', LP), 'classic');
+  assert.equal(exMode(LP), 'double');
+  assert.equal(exMode(FP), 'classic');
+  assert.equal(exMode({ double: true }), 'classic', 'no range yet');
   assert.deepEqual(defaultRange(8), { min: 6, max: 10 });
   assert.deepEqual(defaultRange(12), { min: 10, max: 15 });
   assert.deepEqual(defaultRange(15), { min: 12, max: 20 });
@@ -542,24 +544,25 @@ test('double progression: which exercises, the default range, the mode of an ent
 test('starting values: Classic and Double kept apart; first time in Double = Classic weights, reps at the bottom', () => {
   const classic = sess110('10', [done110('lp', W(80, [8, 8, 8])), done110('fp', W(25, [12, 12, 12]))]);
   // First Double workout: weights from Classic, reps at 6; Face Pull as in Classic.
-  let s = cs110(PLAN110, [classic], new Date('2026-11-12T18:00:00Z'), EXS110, 'double');
-  assert.equal(s.mode, 'double');
+  let s = cs110(PLAN110, [classic], new Date('2026-11-12T18:00:00Z'), EXS110);
+  assert.equal(s.mode, undefined, 'the mode belongs to each exercise');
   assert.deepEqual(s.entries.map((e) => e.mode), ['double', 'classic']);
   assert.deepEqual(s.entries[0].sets, W(80, [6, 6, 6]));
   assert.deepEqual(s.entries[1].sets, W(25, [12, 12, 12]));
   // After a Double workout: Double starts from it, Classic still from the last Classic one.
   const dbl = sess110('12', [done110('lp', W(85, [9, 8, 7]), 'double'), done110('fp', W(27.5, [12, 12, 12]), 'classic')], 'double');
-  s = cs110(PLAN110, [classic, dbl], new Date('2026-11-14T18:00:00Z'), EXS110, 'double');
+  s = cs110(PLAN110, [classic, dbl], new Date('2026-11-14T18:00:00Z'), EXS110);
   assert.deepEqual(s.entries[0].sets, W(85, [9, 8, 7]));
   assert.deepEqual(s.entries[1].sets, W(27.5, [12, 12, 12]), 'Face Pull shares everything');
-  s = cs110(PLAN110, [classic, dbl], new Date('2026-11-14T18:00:00Z'), EXS110, 'classic');
+  // Leg Press set back to Classic: its last Classic weights, its Classic reps.
+  s = cs110(PLAN110, [classic, dbl], new Date('2026-11-14T18:00:00Z'), { ...EXS110, lp: withMode(LP, 'classic') });
   assert.deepEqual(s.entries.map((e) => e.mode), ['classic', 'classic']);
-  assert.deepEqual(s.entries[0].sets, W(80, [8, 8, 8]), 'Classic: last Classic weights, plan reps');
-  // Only Double history so far: Classic falls back to it (weights), with the plan's reps.
-  const onlyDbl = ss110(LP, [dbl], startOpts('classic', LP, {}));
+  assert.deepEqual(s.entries[0].sets, W(80, [8, 8, 8]), 'Classic: last Classic weights, Classic reps');
+  // Only Double history so far: Classic falls back to it (weights), with the exercise's reps.
+  const onlyDbl = ss110(LP, [dbl], startOpts(LP, {}, 'classic'));
   assert.deepEqual(onlyDbl, W(85, [8, 8, 8]));
   // An extra set copies the last one, reps included.
-  const four = ss110({ ...LP, dSets: 4 }, [dbl], startOpts('double', LP, {}));
+  const four = ss110({ ...LP, dSets: 4 }, [dbl], startOpts({ ...LP, dSets: 4 }));
   assert.deepEqual(four, W(85, [9, 8, 7, 7]));
 });
 
@@ -598,7 +601,9 @@ test('summary of a Double workout: more reps at the same weight, compared within
   const d1 = sess110('10', [done110('lp', W(85, [8, 8, 7]), 'double'), done110('fp', W(25, [12, 12, 12]), 'classic')], 'double');
   const d2 = sess110('12', [done110('lp', W(85, [10, 10, 10]), 'double'), done110('fp', W(25, [12, 12, 12]), 'classic')], 'double');
   const sum = sum110(d2, [c, d1, d2], EXS110, PLAN110);
-  assert.equal(sum.mode, 'double');
+  assert.equal(sum.mode, 'double', 'any exercise in Double: no bars');
+  const allClassic = sess110('14', [done110('lp', W(90, [8, 8, 8])), done110('fp', W(25, [12, 12, 12]))]);
+  assert.equal(sum110(allClassic, [c, d1, d2, allClassic], EXS110, PLAN110).mode, 'classic');
   const lp = sum.rows.find((r) => r.exerciseId === 'lp');
   assert.equal(lp.delta, 0, 'same weight as the last Double time (not the Classic 90)');
   assert.equal(lp.repsDelta, 7);
@@ -611,6 +616,30 @@ test('summary of a Double workout: more reps at the same weight, compared within
   const c2 = sess110('09', [done110('lp', W(85, [8, 8, 8]))]);
   const first = sum110(d1, [c, c2, d1], EXS110, PLAN110).rows.find((r) => r.exerciseId === 'lp');
   assert.deepEqual([first.prevTop, first.delta, first.repsDelta], [85, 0, -1]);
+});
+
+test('1.12.0: switching an exercise during a workout, and the one-time move of the Settings switch', () => {
+  // A Classic exercise without a range gets one from its reps; the Double sets start equal to the Classic ones.
+  const lc = { id: 'lc', name: 'Leg Curl', sets: 4, reps: 12 };
+  const d = withMode(lc, 'double');
+  assert.deepEqual([d.double, d.repMin, d.repMax, d.dSets], [true, 10, 15, 4]);
+  const back = withMode({ ...d, dSets: 2 }, 'classic');
+  assert.deepEqual([back.double, back.repMin, back.repMax, back.dSets, back.sets, back.reps], [false, 10, 15, 2, 4, 12], 'everything kept');
+  assert.deepEqual([withMode(back, 'double').dSets, withMode(back, 'double').repMax], [2, 15], 'the range and sets kept');
+  // Today's sets start again in the new mode.
+  const classic = sess110('10', [done110('lp', W(80, [8, 8, 8]))]);
+  const open = { id: 'x', exerciseId: 'lp', kind: 'planned', status: 'open', mode: 'classic', plannedSets: 3, appliedScheme: '4 × 6', planAsked: '3 × 9', sets: W(82.5, [9, 9, 9]) };
+  const r = restartEntry(open, LP, [classic], 'now');
+  assert.deepEqual([r.mode, r.plannedSets, r.appliedScheme, r.planAsked], ['double', 3, null, null]);
+  assert.deepEqual(r.sets, W(80, [6, 6, 6]), 'first time in Double: Classic weights, reps at the bottom');
+  const r2 = restartEntry(r, withMode(LP, 'classic'), [classic], 'now');
+  assert.deepEqual([r2.mode, r2.sets], ['classic', W(80, [8, 8, 8])]);
+  assert.equal(restartEntry({ ...open, kind: 'added', plannedSets: null }, LP, [classic], 'now').plannedSets, null);
+  // The old Settings switch: Classic → every exercise Classic (ranges kept); Double → each keeps its choice.
+  const exs = [LP, FP];
+  assert.deepEqual(moveProgression(exs, { progression: 'classic' }).map((e) => [e.double, e.repMin]), [[false, 6], [false, 10]]);
+  assert.deepEqual(moveProgression(exs, {}).map((e) => e.double), [false, false]);
+  assert.deepEqual(moveProgression(exs, { progression: 'double' }).map((e) => e.double), [true, false]);
 });
 
 test('backups keep Double progression and its range', () => {

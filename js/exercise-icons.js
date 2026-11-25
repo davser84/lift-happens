@@ -1,7 +1,7 @@
 // Exercise icons: part of the app, like its logo, so they are not in backups.
 //
 // ICONS: every icon has a stable key; its picture is icons/exercises/<key>.png
-// (120 x 120 px, transparent; shown at 40 pt). Keys never change.
+// (256 x 256 px, transparent; shown at 40 pt, 84 pt on the open exercise). Keys never change.
 //
 // ICON_BY_EXERCISE: which icon each exercise shows, by the exercise's internal id.
 // Ids never change, so renaming an exercise keeps its icon. An exercise that is not

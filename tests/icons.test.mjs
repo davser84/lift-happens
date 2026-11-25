@@ -11,13 +11,13 @@ test('every mapped exercise points to a known icon', () => {
   for (const [id, key] of Object.entries(ICON_BY_EXERCISE)) assert.ok(ICONS.includes(key), id + ' -> ' + key);
 });
 
-test('every icon has a 120 x 120 PNG and is saved for offline use', () => {
+test('every icon has a 256 x 256 PNG and is saved for offline use', () => {
   for (const key of ICONS) {
     const file = new URL('icons/exercises/' + key + '.png', root);
     assert.ok(existsSync(file), key + '.png is missing');
     const png = readFileSync(file);
-    assert.equal(png.readUInt32BE(16), 120, key + ' width');
-    assert.equal(png.readUInt32BE(20), 120, key + ' height');
+    assert.equal(png.readUInt32BE(16), 256, key + ' width');
+    assert.equal(png.readUInt32BE(20), 256, key + ' height');
     assert.ok(sw.includes("'./icons/exercises/" + key + ".png'"), key + ' is not in sw.js FILES');
   }
   const files = readdirSync(new URL('icons/exercises/', root)).filter((f) => f.endsWith('.png'));

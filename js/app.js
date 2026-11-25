@@ -8,12 +8,12 @@ import {
   pendingReminder, applyScheme, currentScheme, SCHEMES, schemeLabel, hasReminder, nextPlanAfterDelete, mergeExercisesFile, schemeChange,
   suggestIncrease, backupDue, daysSinceBackup, weeksInARow, computeMilestones, liftedComparison, sessionVolume,
   loadOf, barOf, BARS, fmtLoad, signedNum, loadLabel, setUpLoads, MOODS, sessionDataText, thisWeek, closestMilestone, daysBetween, agoText,
-  isDoubleEx, hasRange, rangeText, modeOf, entryMode, startOpts, defaultRange, atTop, doubleReady, lastDone
+  isDoubleEx, hasRange, rangeText, modeOf, exMode, startOpts, withMode, restartEntry, moveProgression, defaultRange, atTop, doubleReady, lastDone
 } from './logic.js';
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.11.0';
+const VERSION = '1.12.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -162,10 +162,25 @@ async function moveSchemesOnce(exercises, plans, settings) {
   return { ...moved, settings: next };
 }
 
+// 1.12.0, once: the Settings switch Classic / Double becomes each exercise's own choice.
+async function moveProgressionOnce(exercises, plans, settings) {
+  if (settings.progressionMoved) return { exercises, plans, settings };
+  const list = moveProgression(exercises, settings);
+  const changed = list.filter((e, i) => e !== exercises[i]);
+  const next = { ...settings, progressionMoved: true };
+  delete next.progression;
+  try {
+    if (changed.length) await db.putMany('exercises', changed);
+    await db.saveSettings(next);
+  } catch (err) { console.warn('Could not move the progression to the exercises', err); }
+  return { exercises: list, plans, settings: next };
+}
+
 // Every one-time update, in order, for data loaded at start or imported from a file.
 async function upgradeData(exercises, plans, settings) {
   const a = await setUpLoadsOnce(exercises, settings);
-  return moveSchemesOnce(a.exercises, plans, a.settings);
+  const b = await moveSchemesOnce(a.exercises, plans, a.settings);
+  return moveProgressionOnce(b.exercises, b.plans, b.settings);
 }
 
 // ======================================================================
@@ -471,7 +486,7 @@ function Home() {
   const start = () => {
     if (!plan) return;
     if (!plan.items.length) { toast('This plan has no exercises yet. Add some in Plans.'); return; }
-    const s = { ...createSession(plan, d.sessions, new Date(), exMap(), d.settings.progression), bodyWeight: d.settings.bodyWeight ?? null };
+    const s = { ...createSession(plan, d.sessions, new Date(), exMap()), bodyWeight: d.settings.bodyWeight ?? null };
     saveSession(s);
     go({ name: 'workout', id: s.id });
   };
@@ -627,11 +642,11 @@ function Workout({ id }) {
   const settings = d.settings;
   const entries = session.entries.slice().sort((a, b) => a.order - b.order);
   const opts = { excludeSessionId: id };
-  const sessionMode = session.mode === 'double' ? 'double' : 'classic';
-  // Starting values of one exercise in this workout's mode (Classic and Double kept apart).
-  const optsFor = (exId) => startOpts(sessionMode, exById[exId], { ...opts });
-  // The exercise's own sets × reps (or sets × range) in this workout's mode, with its starting weights.
+  // Starting values of one exercise in its own mode (Classic and Double kept apart).
+  const optsFor = (exId) => startOpts(exById[exId] || { id: exId }, { ...opts });
+  // The exercise's own sets × reps (or sets × range), with its starting weights.
   const startFor = (exId) => startSets(exById[exId] || { id: exId }, state.sessions, optsFor(exId));
+  const modeFor = (exId) => exMode(exById[exId]);
 
   // Always patch the latest copy, so quick taps never overwrite each other.
   const patchEntries = (fn) => {
@@ -718,6 +733,19 @@ function Workout({ id }) {
   };
 
 
+  // Classic ↔ Double for this exercise, from now on in every workout (no question); today's sets start
+  // again in the new mode. Undo puts back the exercise and today's values.
+  const switchMode = (eid, mode) => {
+    const before = latestEntry(eid);
+    const ex = before && exById[before.exerciseId];
+    if (!ex || before.status !== 'open' || modeOf(before) === mode) return;
+    const nextEx = withMode(ex, mode);
+    saveExercise(nextEx);
+    patchEntry(eid, (x) => restartEntry(x, nextEx, state.sessions, id));
+    toast(ex.name + ' is now ' + (mode === 'double' ? 'Double progression, ' : 'Classic, ') + schemeTextOf(nextEx) + ', in every workout.',
+      { label: 'Undo', run: () => { saveExercise(ex); patchEntry(eid, () => before); } });
+  };
+
   const pickSwap = (entryId, exId) => {
     setSheet(null);
     patchEntry(entryId, (e) => {
@@ -725,7 +753,7 @@ function Workout({ id }) {
       return {
         ...e, kind: 'swapped', status: 'open', doneAt: null,
         replacesExerciseId: e.kind === 'swapped' ? e.replacesExerciseId : e.exerciseId,
-        exerciseId: exId, plannedSets: sets.length, appliedScheme: null, mode: entryMode(sessionMode, exById[exId]), sets
+        exerciseId: exId, plannedSets: sets.length, appliedScheme: null, mode: modeFor(exId), sets
       };
     });
     setOpenId(entryId);
@@ -736,7 +764,7 @@ function Workout({ id }) {
       const sets = startFor(x.replacesExerciseId);
       return {
         ...x, kind: 'planned', exerciseId: x.replacesExerciseId, replacesExerciseId: null, status: 'open', doneAt: null,
-        plannedSets: sets.length, appliedScheme: null, mode: entryMode(sessionMode, exById[x.replacesExerciseId]), sets
+        plannedSets: sets.length, appliedScheme: null, mode: modeFor(x.replacesExerciseId), sets
       };
     });
   };
@@ -748,7 +776,7 @@ function Workout({ id }) {
       const order = list.reduce((m, x) => Math.max(m, x.order), -1) + 1;
       return [...list, {
         id: newId, order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
-        status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: entryMode(sessionMode, exById[exId]),
+        status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: modeFor(exId),
         sets: startFor(exId)
       }];
     });
@@ -907,6 +935,12 @@ function Workout({ id }) {
     // Reaching the top today: shown unless the card already says it is time for more weight.
     const top = dbl && e.status === 'open' && !ready && atTop(e, ex);
     const open = openId === e.id;
+    // Classic | Double on the open exercise, while it is still to do (not when editing a finished workout).
+    const canSwitch = open && e.status === 'open' && !editing;
+    // First time in Double: the Classic weights (if any), reps at the bottom of the range.
+    const firstD = dbl && open && e.status === 'open' && !lastD
+      ? (lastDone(d.sessions, e.exerciseId, { excludeSessionId: id }) ? 'your Classic weights, reps from ' : 'reps from ') + ex.repMin + '.' : null;
+    const hasIcon = !!exerciseIconSrc(e.exerciseId);
     const isDone = e.status === 'done';
     const isSkipped = e.status === 'skipped';
     const canSwipe = e.status === 'open' && !open;
@@ -929,6 +963,7 @@ function Workout({ id }) {
     return html`<div key=${e.id} class="swipe-wrap">
       ${dx > 0 ? html`<div class="swipe-under" style=${'opacity:' + Math.min(1, dx / 90)}><span><${Icon} name="check" sw=${3} /> Done</span></div>` : null}
       <section class=${'card ex-card' + (open ? ' open' : '') + (open && e.status === 'open' && !editing ? ' live' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
+        <div class=${'ex-top' + (hasIcon ? ' has-icon' : '')}>
         <button class="ex-head" aria-expanded=${open} ...${swipeHandlers(e, canSwipe)}
           onClick=${() => { if (suppressClick.current) return; clearEdit(); setOpenId(open ? null : e.id); }}>
           <div class="ex-head-text">
@@ -942,13 +977,18 @@ function Workout({ id }) {
             </span>` : null}
             ${outRem ? html`<span class="rem-out">Next time: ${remText(outRem)}</span>` : null}
           </div>
-          ${exerciseIconSrc(e.exerciseId) ? html`<span class="ex-head-side">
+          ${hasIcon ? html`<span class="ex-head-side">
               ${isSkipped ? html`<span class="skip-badge">Skipped</span>` : null}
-              <${ExIcon} id=${e.exerciseId} done=${isDone} skipped=${isSkipped} />
+              <${ExIcon} id=${e.exerciseId} done=${isDone} skipped=${isSkipped} size=${open ? 84 : 40} />
             </span>` : html`
           ${isDone ? html`<span class="check-badge"><${Icon} name="check" size=${16} sw=${3} /></span>` : null}
           ${isSkipped ? html`<span class="skip-badge">Skipped</span>` : null}`}
         </button>
+        ${canSwitch ? html`<div class="mode-row"><div class="seg mode-seg" role="radiogroup" aria-label=${'Progression of ' + ex.name}>
+          <button role="radio" aria-checked=${!dbl} class=${!dbl ? 'on' : ''} onClick=${() => switchMode(e.id, 'classic')}>Classic</button>
+          <button role="radio" aria-checked=${dbl} class=${dbl ? 'on dbl' : ''} onClick=${() => switchMode(e.id, 'double')}>Double</button>
+        </div></div>` : null}
+        </div>
         ${open ? html`<div class="ex-body">
           ${isSkipped ? html`<div class="skip-box">
             <p style="flex: 1">Logged as skipped. It stays in the plan with the same weights next time.</p>
@@ -974,6 +1014,7 @@ function Workout({ id }) {
             ${inRem.note && inRem.note.trim() ? html`<em style="color: var(--text-2)">“${inRem.note.trim()}”</em>` : null}
             <span class="tiny muted">Cleared when you tap Done.</span>
           </div>` : null}
+          ${firstD ? html`<span class="dp-last small num">First time in Double: ${firstD}</span>` : null}
           ${lastD ? html`<span class="dp-last small num">Last time: ${lastD.entry.sets.every((x) => x.weight === lastD.entry.sets[0].weight)
             ? fmtLoad(lastD.entry.sets[0].weight, ex) + ' × ' + lastD.entry.sets.map((x) => x.reps).join(' · ')
             : setsText(lastD.entry.sets, ex)}</span>` : null}
@@ -1054,8 +1095,7 @@ function Workout({ id }) {
           ? html`<span class="section-label" style="margin: 0">Editing</span>`
           : html`<button class="icon-btn back" aria-label="Back to Today" onClick=${() => go({ name: 'home' })}><${Icon} name="back" size=${22} /></button>`}
         <div style="display: flex; align-items: center; gap: 2px">
-          <span class=${'mode-tag' + (sessionMode === 'double' ? ' double' : '')}>${sessionMode === 'double' ? 'Double progression' : 'Classic'}</span>
-          <span class="small muted" style="margin-left: 6px">${fmtDate(session.startedAt, true)}${editing ? ' · ' + hhmm(session.startedAt) : ''}</span>
+          <span class="small muted">${fmtDate(session.startedAt, true)}${editing ? ' · ' + hhmm(session.startedAt) : ''}</span>
           <button class="icon-btn" style="margin-right: -10px" aria-label="Workout options" onClick=${() => setMenu(true)}><${Icon} name="more" size=${24} sw=${3.5} /></button>
         </div>
       </div>
@@ -1155,7 +1195,7 @@ function Workout({ id }) {
 
 // Comparison cards: shown at the end of a workout (live) and at the bottom of every workout log.
 function SummaryCards({ sum, plan, live }) {
-  // A Double progression workout: progress is more weight or more reps (different units: no bars).
+  // An exercise in Double progression: progress is more weight or more reps (different units: no bars).
   const dbl = sum.mode === 'double';
   const maxAbs = Math.max(0, ...sum.rows.filter((r) => r.delta !== null && !r.bodyweight).map((r) => Math.abs(r.delta)));
   const volPct = sum.volPct === null ? '—' : (sum.volPct > 0 ? '+' : sum.volPct < 0 ? '−' : '±') + Math.abs(sum.volPct).toFixed(1) + '%';
@@ -1262,8 +1302,8 @@ function addToFinished(id, exId) {
   const order = cur.entries.reduce((m, x) => Math.max(m, x.order), -1) + 1;
   const entry = {
     id: uid(), order, exerciseId: exId, planItemId: null, kind: 'added', replacesExerciseId: null,
-    status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: entryMode(cur.mode, exById[exId]),
-    sets: startSets(exById[exId] || { id: exId }, state.sessions, startOpts(cur.mode, exById[exId], { excludeSessionId: id }))
+    status: 'open', doneAt: null, plannedSets: null, reminder: null, mode: exMode(exById[exId]),
+    sets: startSets(exById[exId] || { id: exId }, state.sessions, startOpts(exById[exId] || { id: exId }, { excludeSessionId: id }))
   };
   saveSession({ ...cur, finishedAt: null, entries: [...cur.entries, entry] });
   go({ name: 'workout', id });
@@ -1381,7 +1421,7 @@ function Plans() {
             <span class="small muted num" style="width: 18px; align-self: flex-start; padding-top: 2px">${i + 1}</span>
             <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
               <span style="font-size: 16px; font-weight: 600; line-height: 1.25">${ex.name}</span>
-              <span class="small num" style="color: var(--text-2)">${schemeTextOf(ex, d.settings.progression)} · ${lastW(ex)}</span>
+              <span class="small num" style="color: var(--text-2)">${schemeTextOf(ex)} · ${lastW(ex)}</span>
             </span>
             <${ExIcon} id=${ex.id} />
           </button>
@@ -1632,7 +1672,7 @@ function SessionDetail({ id, from }) {
     <div class="header" style="gap: 6px">
       <button class="btn btn-ghost link" style="align-self: flex-start; margin-left: -10px; padding: 0 8px; font-size: 16px" onClick=${() => go({ name: from === 'home' ? 'home' : 'progress' })}><${Icon} name="back" size=${20} sw=${2.2} />${from === 'home' ? 'Today' : d.progressTab === 'overview' ? 'Progress' : 'Workouts'}</button>
       <h1 class="title">${planName(plan)}</h1>
-      <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}${session.mode === 'double' ? html` <span class="mode-tag double">Double progression</span>` : null}</span>
+      <span class="small muted">${fmtDate(session.startedAt, true)} · ${hhmm(session.startedAt)}</span>
     </div>
     <div class="main">
       <${SessionCard} key=${session.id} session=${session} note="Fill in when you like: it saves as you type." />
@@ -1885,7 +1925,7 @@ function IntField({ label, value, onSave, min = 1, max = 50 }) {
 }
 
 // Classic: sets and reps. Double progression: sets and the reps range. Choosing one decides how the
-// exercise works when Settings is on Double progression; the values of both are kept.
+// exercise is done in every workout (also switchable during a workout); the values of both are kept.
 function ProgressionFields({ ex, save }) {
   const dbl = !!ex.double;
   const cs = classicScheme(ex);
@@ -2002,7 +2042,7 @@ function Exercises() {
         const ps = inPlans(ex.id);
         const last = lastDone(d.sessions, ex.id);
         const wTxt = last ? (last.top === 0 && loadOf(ex) !== 'bodyweight' ? 'bodyweight' : 'last ' + fmtLoad(last.top, ex)) : 'no weight yet';
-        const scheme = ex.double && hasRange(ex) ? 'Double ' + doubleSets(ex) + ' × ' + rangeText(ex) : schemeTextOf(ex, 'classic');
+        const scheme = (exMode(ex) === 'double' ? 'Double ' : '') + schemeTextOf(ex);
         return html`<div key=${ex.id} class=${'card' + (open ? ' ex-card open' : '')}>
           <button class="ex-head" style="min-height: 60px" aria-expanded=${open} onClick=${() => setOpenId(open ? null : ex.id)}>
             <div class="ex-head-text">
@@ -2069,15 +2109,6 @@ function Settings() {
   return html`<div class="screen">
     <div class="header"><h1 class="title">Settings</h1></div>
     <div class="main" style="gap: 6px">
-      <span class="section-label">Progression</span>
-      <div class="card card-pad" style="gap: 10px">
-        <div class="seg" role="radiogroup" aria-label="Progression" style="background: var(--bg)">
-          <button role="radio" aria-checked=${s.progression !== 'double'} class=${s.progression !== 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'classic' })}>Classic</button>
-          <button role="radio" aria-checked=${s.progression === 'double'} class=${s.progression === 'double' ? 'on' : ''} onClick=${() => saveSettings({ progression: 'double' })}>Double progression</button>
-        </div>
-        <span class="tiny muted" style="line-height: 1.4">Exercises set to Double progression use their range and their own weights. The others work as in Classic. A workout already open keeps its mode.</span>
-      </div>
-
       <span class="section-label">Exercises</span>
       <button class="card row" style="text-align: left; width: 100%" onClick=${() => go({ name: 'exercises' })}>
         <span style="display: flex; flex-direction: column; gap: 2px"><span>Exercises</span>

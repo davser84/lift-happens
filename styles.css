@@ -320,3 +320,14 @@ h1, h2, h3, p { margin: 0; }
 .search { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 6px 0 14px; border: 1px solid var(--line-2); border-radius: 14px; background: var(--bg); color: var(--muted); }
 .search input { flex: 1; min-width: 0; height: 44px; border: 0; background: transparent; color: var(--text); font-size: 17px; outline: none; -webkit-appearance: none; appearance: none; }
 .search input::-webkit-search-cancel-button { display: none; }
+
+/* 1.12.0: Classic | Double on the open exercise; its icon larger, next to name, scheme and selector */
+.ex-top { position: relative; }
+.ex-card.open .ex-top.has-icon { min-height: 108px; }
+.ex-card.open .ex-top.has-icon .ex-head { padding-right: 112px; }
+.ex-card.open .ex-top.has-icon .ex-head-side { position: absolute; top: 12px; right: 14px; }
+.mode-row { padding: 0 14px 8px; }
+.ex-card.open .ex-top.has-icon .mode-row { padding-right: 112px; }
+.mode-seg { display: inline-grid; grid-auto-columns: auto; padding: 3px; gap: 3px; background: var(--bg); }
+.mode-seg button { min-height: 36px; padding: 0 16px; font-size: 14px; }
+.mode-seg button.on.dbl { background: rgba(52,199,123,0.16); color: var(--go); }
