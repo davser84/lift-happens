@@ -13,7 +13,7 @@ import {
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.12.1';
+const VERSION = '1.12.2';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
