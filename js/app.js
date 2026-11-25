@@ -13,7 +13,7 @@ import {
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.12.2';
+const VERSION = '1.13.0';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -671,6 +671,11 @@ function Workout({ id }) {
   };
   const patchEntry = (eid, fn) => patchEntries((list) => list.map((e) => (e.id === eid ? fn(e) : e)));
   const patchSet = (eid, i, patch) => patchEntry(eid, (e) => ({ ...e, sets: e.sets.map((x, j) => (j === i ? { ...x, ...patch } : x)) }));
+  // Double progression: one weight for every set of the exercise.
+  const setAllW = (eid, fn) => patchEntry(eid, (e) => {
+    const w = fn(e.sets.length ? e.sets[0].weight : null);
+    return { ...e, sets: e.sets.map((x) => ({ ...x, weight: w })) };
+  });
   const latestEntry = (eid) => (getSession(id).entries.find((e) => e.id === eid));
 
   const nextOpenAfter = (eid, list) => {
@@ -823,9 +828,10 @@ function Workout({ id }) {
     if (Number.isNaN(v)) return;
     // Below 0 only for body-weight exercises (assisted, with a counterweight).
     const en = latestEntry(ed.entryId);
-    const neg = ed.f === 'w' && en && loadOf(state.exercises.find((x) => x.id === en.exerciseId)) === 'bodyweight';
+    const neg = (ed.f === 'w' || ed.f === 'wa') && en && loadOf(state.exercises.find((x) => x.id === en.exerciseId)) === 'bodyweight';
     if (v < 0 && !neg) return;
-    patchSet(ed.entryId, ed.i, ed.f === 'w' ? { weight: round2(v) } : { reps: Math.round(v) });
+    if (ed.f === 'wa') setAllW(ed.entryId, () => round2(v));
+    else patchSet(ed.entryId, ed.i, ed.f === 'w' ? { weight: round2(v) } : { reps: Math.round(v) });
   };
 
   const finalize = (skipOpen, auto = false) => {
@@ -950,6 +956,8 @@ function Workout({ id }) {
     const lastD = dbl && openId === e.id ? lastDone(d.sessions, e.exerciseId, { excludeSessionId: id, mode: 'double' }) : null;
     // Reaching the top today: shown unless the card already says it is time for more weight.
     const top = dbl && e.status === 'open' && !ready && atTop(e, ex);
+    // Double progression: one weight for every set (a log with different weights keeps one per set).
+    const oneW = dbl && e.sets.length > 0 && e.sets.every((x) => x.weight === e.sets[0].weight);
     const open = openId === e.id;
     // Classic | Double on the open exercise, while it is still to do (not when editing a finished workout).
     const canSwitch = open && e.status === 'open' && !editing;
@@ -1034,8 +1042,34 @@ function Workout({ id }) {
           ${lastD ? html`<span class="dp-last small num">Last time: ${lastD.entry.sets.every((x) => x.weight === lastD.entry.sets[0].weight)
             ? fmtLoad(lastD.entry.sets[0].weight, ex) + ' × ' + lastD.entry.sets.map((x) => x.reps).join(' · ')
             : setsText(lastD.entry.sets, ex)}</span>` : null}
-          <div class="set-grid"><span></span><span class="col-label">${bwLoad ? 'KG ON BODY WEIGHT' : 'KG'}</span><span class="col-label">${dbl ? 'REPS ' + rangeText(ex) : 'REPS'}</span><span></span></div>
-          ${e.sets.map((s, i) => {
+          <div class="set-grid"><span></span><span class="col-label">${oneW ? (bwLoad ? 'ON BW · ALL SETS' : 'KG · ALL SETS') : bwLoad ? 'KG ON BODY WEIGHT' : 'KG'}</span><span class="col-label">${dbl ? 'REPS ' + rangeText(ex) : 'REPS'}</span><span></span></div>
+          ${oneW ? html`<div class="set-grid one-w-grid" style=${'grid-template-rows: repeat(' + e.sets.length + ', 44px)'}>
+            <div class=${'stepper one-w' + (e.sets.length >= 3 ? ' vertical' : '') + (e.sets[0].weight === null || e.sets[0].weight === undefined ? ' empty' : '')} style=${'grid-column: 2; grid-row: 1 / span ' + e.sets.length}>
+              <button class="icon-btn" aria-label="Decrease weight, all sets" onClick=${() => setAllW(e.id, (w) => decrease(ex.equipment, w, settings, bwLoad))}><${Icon} name="minus" size=${20} sw=${2.2} /></button>
+              <input class="step-field" inputmode="decimal" enterkeyhint="done" autocomplete="off" aria-label="Weight in kg, all sets" placeholder="enter"
+                value=${edit && edit.entryId === e.id && edit.f === 'wa' ? edit.draft : (e.sets[0].weight === null || e.sets[0].weight === undefined ? '' : signedNum(e.sets[0].weight))}
+                onFocus=${(ev) => startEdit(ev, e.id, 0, 'wa', e.sets[0].weight === null || e.sets[0].weight === undefined ? '' : signedNum(e.sets[0].weight))}
+                onInput=${onEditInput} onBlur=${commitEdit} onKeyDown=${onEditKey} />
+              <button class="icon-btn" aria-label="Increase weight, all sets" onClick=${() => setAllW(e.id, (w) => increase(ex.equipment, w, settings))}><${Icon} name="plus" size=${20} sw=${2.2} /></button>
+            </div>
+            ${e.sets.map((s, i) => {
+              const editR = edit && edit.entryId === e.id && edit.i === i && edit.f === 'r';
+              return [
+                html`<span key=${'n' + i} class="set-num" style=${'grid-column: 1; grid-row: ' + (i + 1)}>${i + 1}</span>`,
+                html`<div key=${'r' + i} class=${'stepper' + (s.reps >= ex.repMax ? ' rep-max' : s.reps < ex.repMin ? ' rep-low' : '')} style=${'grid-column: 3; grid-row: ' + (i + 1)}>
+                  <button class="icon-btn" aria-label=${'Fewer reps, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { reps: Math.max(0, latestEntry(e.id).sets[i].reps - 1) })}><${Icon} name="minus" size=${18} sw=${2.2} /></button>
+                  <input class="step-field" inputmode="numeric" enterkeyhint="done" autocomplete="off" aria-label=${'Reps, set ' + (i + 1)}
+                    value=${editR ? edit.draft : String(s.reps)}
+                    onFocus=${(ev) => startEdit(ev, e.id, i, 'r', String(s.reps))}
+                    onInput=${onEditInput} onBlur=${commitEdit} onKeyDown=${onEditKey} />
+                  <button class="icon-btn" aria-label=${'More reps, set ' + (i + 1)} onClick=${() => patchSet(e.id, i, { reps: latestEntry(e.id).sets[i].reps + 1 })}><${Icon} name="plus" size=${18} sw=${2.2} /></button>
+                </div>`,
+                e.sets.length > 1
+                  ? html`<button key=${'x' + i} class="icon-btn remove-set" style=${'grid-column: 4; grid-row: ' + (i + 1)} aria-label=${'Remove set ' + (i + 1) + ' from today’s log'} onClick=${() => patchEntry(e.id, (x) => ({ ...x, sets: x.sets.filter((_, j) => j !== i) }))}><${Icon} name="x" size=${18} /></button>`
+                  : null
+              ];
+            })}
+          </div>` : e.sets.map((s, i) => {
             const editW = edit && edit.entryId === e.id && edit.i === i && edit.f === 'w';
             const editR = edit && edit.entryId === e.id && edit.i === i && edit.f === 'r';
             const empty = s.weight === null || s.weight === undefined;
@@ -1184,7 +1218,7 @@ function Workout({ id }) {
       };
       return html`<${Sheet} title=${'Suggested: more weight'} sub=${ex.name} onClose=${() => setSugSheet(null)}>
         <button class="sheet-item btn-danger-text" style="justify-content: center" onClick=${off}>Don’t suggest for ${ex.name}</button>
-        <p class="small muted" style="padding: 10px 10px 0; line-height: 1.45">You can turn it back on in Plans or in Settings → Exercises.</p>
+        <p class="small muted" style="padding: 10px 10px 0; line-height: 1.45">You can turn it back on in Settings → Exercises.</p>
       </${Sheet}>`;
     })() : null}
 
@@ -1821,7 +1855,7 @@ function ExerciseProgress() {
             <text x=${R} y="190" font-size="11" fill="#9DA9C0" text-anchor="end">${fmtDate(pts[N - 1].session.startedAt)}</text>
           </svg>
           ${pts.map((h, i) => html`<button key=${'b' + i} aria-label=${fmtDate(h.session.startedAt) + ', ' + fmtV(vals[i])} onClick=${() => setSel(i)}
-            style=${'position:absolute;top:0;height:88%;border:0;padding:0;background:transparent;left:' + pct(X(i) - colW / 2) + ';width:' + pct(colW)}></button>`)}
+            style=${'position:absolute;top:0;height:88%;border:0;padding:0;background:transparent;left:' + pct(Math.max(0, X(i) - colW / 2)) + ';width:' + pct(Math.min(W, X(i) + colW / 2) - Math.max(0, X(i) - colW / 2))}></button>`)}
           <div class="tip" role="status" style=${'left:' + pct(tipLeft) + ';top:' + (tipTop / 200) * 100 + '%'}>
             <span class="tiny muted">${fmtDate(pts[s].session.startedAt) + ' · ' + planName(planOf(pts[s].session))}</span>
             <span class="num" style="font-weight: 600">${fmtV(vals[s])}</span>

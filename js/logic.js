@@ -212,9 +212,24 @@ function startReps(count, reps, from, opts) {
 
 // Starting sets for an exercise: weights from its last time (in the same mode when it keeps Classic and
 // Double apart), else empty, to be entered at the gym; reps per the mode (see startReps).
+// The one weight of Double progression from a log with several: the one used in most sets (a tie:
+// the heaviest). null when the log has no weight.
+export function workingWeight(weights) {
+  const n = new Map();
+  for (const w of weights) if (w !== null && w !== undefined) n.set(w, (n.get(w) || 0) + 1);
+  let best = null, bestN = 0;
+  for (const [w, k] of n) if (k > bestN || (k === bestN && w > best)) { best = w; bestN = k; }
+  return best;
+}
+
 export function setsFromHistory(exerciseId, count, reps, sessions, opts = {}) {
   const from = startFrom(sessions, exerciseId, opts);
-  const weights = from.prev ? spread(from.prev.entry.sets.map((x) => x.weight), count) : spread([], count);
+  let weights = from.prev ? spread(from.prev.entry.sets.map((x) => x.weight), count) : spread([], count);
+  // Double progression: one weight for every set.
+  if (opts.mode === 'double' && from.prev) {
+    const w = workingWeight(from.prev.entry.sets.map((x) => x.weight));
+    weights = weights.map(() => w);
+  }
   const r = startReps(count, reps, from, opts);
   return weights.map((w, i) => ({ weight: w, reps: r[i] }));
 }

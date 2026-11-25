@@ -618,6 +618,22 @@ test('summary of a Double workout: more reps at the same weight, compared within
   assert.deepEqual([first.prevTop, first.delta, first.repsDelta], [85, 0, -1]);
 });
 
+test('1.13.0: Double progression starts with one weight for every set', async () => {
+  const { workingWeight } = await import('../js/logic.js');
+  assert.equal(workingWeight([27.5, 27.5, 30]), 27.5, 'the one used in most sets');
+  assert.equal(workingWeight([27.5, 30]), 30, 'a tie: the heaviest');
+  assert.equal(workingWeight([null, null]), null);
+  assert.equal(workingWeight([-10, -10, -5]), -10, 'body weight with a counterweight');
+  // First time in Double from Classic sets with different weights.
+  const classic = sess110('10', [done110('lp', [{ weight: 80, reps: 8 }, { weight: 80, reps: 8 }, { weight: 85, reps: 6 }])]);
+  assert.deepEqual(ss110(LP, [classic], startOpts(LP, {})), W(80, [6, 6, 6]));
+  // An old Double log with different weights: one weight from now on.
+  const oldD = sess110('12', [{ ...done110('lp', [{ weight: 85, reps: 9 }, { weight: 85, reps: 8 }, { weight: 80, reps: 10 }]), mode: 'double' }]);
+  assert.deepEqual(ss110(LP, [classic, oldD], startOpts(LP, {})), [{ weight: 85, reps: 9 }, { weight: 85, reps: 8 }, { weight: 85, reps: 10 }]);
+  // Classic keeps one weight per set.
+  assert.deepEqual(ss110(withMode(LP, 'classic'), [classic], startOpts(withMode(LP, 'classic'), {})).map((x) => x.weight), [80, 80, 85]);
+});
+
 test('1.12.0: switching an exercise during a workout, and the one-time move of the Settings switch', () => {
   // A Classic exercise without a range gets one from its reps; the Double sets start equal to the Classic ones.
   const lc = { id: 'lc', name: 'Leg Curl', sets: 4, reps: 12 };
