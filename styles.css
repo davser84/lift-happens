@@ -331,3 +331,9 @@ h1, h2, h3, p { margin: 0; }
 .mode-seg { display: inline-grid; grid-auto-columns: auto; padding: 3px; gap: 3px; background: var(--bg); }
 .mode-seg button { min-height: 36px; padding: 0 16px; font-size: 14px; }
 .mode-seg button.on.dbl { background: rgba(52,199,123,0.16); color: var(--go); }
+
+/* 1.12.1: a lower workout header (title next to the back arrow), so the open exercise and its Done fit */
+.wk-header { padding-top: calc(var(--safe-top) + 6px); gap: 8px; }
+.wk-header .header-row { gap: 8px; }
+.wk-title { flex: 1; min-width: 0; font-size: 26px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wk-header .quote.quote-go { margin-top: 0; }

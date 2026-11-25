@@ -13,7 +13,7 @@ import {
 import { QUOTES } from './quotes.js';
 import { exerciseIconSrc } from './exercise-icons.js';
 
-const VERSION = '1.12.0';
+const VERSION = '1.12.1';
 
 // ======================================================================
 // Store: one in-memory copy of the data, written through to IndexedDB.
@@ -634,6 +634,22 @@ function Workout({ id }) {
     return () => clearTimeout(t);
   }, [remPanel, noteOpen]);
 
+  // Opening an exercise (tap, auto-advance, swap, add) brings its name to the top of the list, so its
+  // sets and Done are in view. Not on the first render: the first exercise is already at the top.
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) { firstRender.current = false; return undefined; }
+    if (!openId) return undefined;
+    const t = setTimeout(() => {
+      const main = mainRef.current;
+      const card = main && main.querySelector('[data-entry="' + openId + '"]');
+      if (!card) return;
+      const r = card.getBoundingClientRect(), m = main.getBoundingClientRect();
+      main.scrollBy({ top: r.top - m.top - 8, behavior: 'smooth' });
+    }, 40);
+    return () => clearTimeout(t);
+  }, [openId]);
+
   useEffect(() => { if (!session) go({ name: 'home' }); }, [session]);
   if (!session) return null;
 
@@ -960,7 +976,7 @@ function Workout({ id }) {
     if (e.kind === 'swapped') tags.push('Replaces ' + ((exById[e.replacesExerciseId] || {}).name || 'planned exercise') + ' · today only');
     if (planned && e.sets.length !== planned) tags.push(e.sets.length + ' of ' + planned + ' sets · log only');
 
-    return html`<div key=${e.id} class="swipe-wrap">
+    return html`<div key=${e.id} class="swipe-wrap" data-entry=${e.id}>
       ${dx > 0 ? html`<div class="swipe-under" style=${'opacity:' + Math.min(1, dx / 90)}><span><${Icon} name="check" sw=${3} /> Done</span></div>` : null}
       <section class=${'card ex-card' + (open ? ' open' : '') + (open && e.status === 'open' && !editing ? ' live' : '')} style=${'transform: translateX(' + dx + 'px); transition: ' + (dx ? 'none' : 'transform 0.2s ease')}>
         <div class=${'ex-top' + (hasIcon ? ' has-icon' : '')}>
@@ -970,9 +986,9 @@ function Workout({ id }) {
             <span class="ex-name">${open && e.status === 'open' && !editing ? html`<span class="live-dot" aria-label="In progress"></span>` : null}${ex.name}${ex.setup ? html`<span class="muted"><${Icon} name="wrench" size=${14} /></span>` : null}</span>
             <span class="small muted num">${e.sets.length} × ${dbl ? rangeText(ex) : rTxt} · ${wTxt}</span>
             ${tags.length ? html`<span class="ex-tag">${tags.join(' · ')}</span>` : null}
-            ${inChips.length || ((suggest || ready) && !open) ? html`<span class="rem-chips">
-              ${suggest && !open ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />suggested</span>` : null}
-              ${ready && !open ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />more weight</span>` : null}
+            ${!open && (inChips.length || suggest || ready) ? html`<span class="rem-chips">
+              ${suggest ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />suggested</span>` : null}
+              ${ready ? html`<span class="rem-chip sug"><${Icon} name="up" size=${12} sw=${2.6} />more weight</span>` : null}
               ${inChips.map((c) => html`<span key=${c} class="rem-chip"><${Icon} name="bell" size=${12} sw=${2.4} />${c}</span>`)}
             </span>` : null}
             ${outRem ? html`<span class="rem-out">Next time: ${remText(outRem)}</span>` : null}
@@ -1089,17 +1105,17 @@ function Workout({ id }) {
   };
 
   return html`<div class="screen">
-    <div class="header">
+    <div class="header wk-header">
       <div class="header-row">
         ${editing
           ? html`<span class="section-label" style="margin: 0">Editing</span>`
           : html`<button class="icon-btn back" aria-label="Back to Today" onClick=${() => go({ name: 'home' })}><${Icon} name="back" size=${22} /></button>`}
-        <div style="display: flex; align-items: center; gap: 2px">
-          <span class="small muted">${fmtDate(session.startedAt, true)}${editing ? ' · ' + hhmm(session.startedAt) : ''}</span>
+        <h1 class="title wk-title">${planName(plan)}</h1>
+        <div style="display: flex; align-items: center; gap: 2px; flex-shrink: 0">
+          <span class="small muted">${editing ? fmtDate(session.startedAt) + ' · ' + hhmm(session.startedAt) : fmtDate(session.startedAt, true)}</span>
           <button class="icon-btn" style="margin-right: -10px" aria-label="Workout options" onClick=${() => setMenu(true)}><${Icon} name="more" size=${24} sw=${3.5} /></button>
         </div>
       </div>
-      <h1 class="title">${planName(plan)}</h1>
       <div style="display: flex; align-items: center; gap: 10px">
         <div class="bar"><div style=${'width:' + Math.round((handled / Math.max(1, entries.length)) * 100) + '%'}></div></div>
         <span class="small muted num">${handled} / ${entries.length} exercises</span>
